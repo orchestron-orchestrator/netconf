@@ -1,0 +1,489 @@
+# Copyright (C) Deutsche Telekom AG
+#
+# Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+
+import logging
+import net
+import process
+import xml
+
+"""Netconf client"""
+
+SEPARATOR_FRAMING: int = 0
+CHUNKED_FRAMING: int = 1
+
+CHUNK_SIZE_MAX: int = 4294967295
+
+LEGACY_SEPARATOR_STR: str = "]]>]]>"
+LEGACY_SEPARATOR_BYTES: bytes = LEGACY_SEPARATOR_STR.encode()
+
+CHUNK_TAG_PREFIX: bytes = "\n#".encode()
+CHUNK_TAG_END_OF_MSG: bytes = "#".encode()
+CHUNK_TAG_POSTFIX: bytes = "\n".encode()
+
+CAP_NC_1_1 = "urn:ietf:params:netconf:base:1.1"
+
+NS_NC_1_1 = "urn:ietf:params:xml:ns:netconf:base:1.0"
+NS_YANG_ACTION = "urn:ietf:params:xml:ns:yang:1"
+
+actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?str, key: ?str,
+        on_connect: action(Client) -> None,
+        on_error: action(Client, str) -> None,
+        on_notif: ?action(Client, xml.Node) -> None,
+        log_handler: ?logging.Handler):
+
+    var logh = logging.Handler("netconf")
+    if log_handler is not None:
+        logh.set_handler(log_handler)
+    var log = logging.Logger(logh)
+
+    var framing = SEPARATOR_FRAMING
+    var recv_buf = Buffer()
+    var chunk_buf = Buffer()
+
+    var session_id: ?str = None
+    var capabilities: list[str] = []
+
+    var message_id = 1
+    var rpc_cbs: dict[str, action(Client, ?xml.Node) -> None] = {}
+
+    var p: ?process.Process = None
+
+    def p_on_stderr(p, data):
+        log.debug("STDERR", {"data": data})
+
+    def p_on_exit(p, exit_code, term_signal):
+        log.debug("SSH process exited", {"exit_code": exit_code, "term_signal": term_signal})
+
+    def p_on_error(p, error):
+        log.debug("Error from process", {"error": error})
+
+    cmd_env = None
+    if key is not None:
+        cmd = ["ssh", "-p", str(port), "-l", username, "-i", key]
+    elif password is not None:
+        cmd_env = {"SSHPASS": password}
+        #cmd = ["/usr/bin/env", "sshpass", "-e", "/usr/bin/ssh", "-p", str(port), "-l", username]
+        #cmd = ["/usr/bin/sshpass", "-e", "/usr/bin/ssh", "-p", str(port), "-l", username]
+        # TODO: do something better than accepting all new host keys!
+        cmd = ["/usr/bin/sshpass", "-e", "ssh", "-o", "StrictHostKeyChecking=no", "-p", str(port), "-l", username]
+    else:
+        cmd = ["/usr/bin/ssh", "-p", str(port), "-l", username]
+    cmd += [address, "-s", "netconf"]
+    #log.trace("Try process: " + str(cmd))
+
+    def close() -> None:
+        _p = p
+        if _p is not None:
+            _p.stop()
+            p = None
+        for rpc_cb in rpc_cbs.values():
+            rpc_cb(self, None)
+        #rpc_cbs.clear()
+        rpc_cbs = {}
+
+    def _send_message(data: Buffer) -> None:
+        if p is not None:
+            if framing == SEPARATOR_FRAMING:
+                data.write_bytes(LEGACY_SEPARATOR_BYTES)
+                _msg = data.read_all_bytes()
+                log.trace("Sending message", {"msg": _msg})
+                p.write(_msg)
+            elif framing == CHUNKED_FRAMING:
+                while True:
+                    chunk_size = CHUNK_SIZE_MAX if data.unread_bytes > CHUNK_SIZE_MAX else data.unread_bytes
+                    if chunk_size <= 0:
+                        p.write("\n##\n".encode())
+                        break
+
+                    _chunk = data.read_bytes(chunk_size)
+                    log.trace("Sending chunk", {"chunk_size": chunk_size, "chunk": _chunk})
+                    p.write(("\n#" + str(chunk_size) + "\n").encode())
+                    p.write(_chunk)
+        else:
+            _on_session_defunct_error("Connection closed")
+
+    def rpc(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
+        message_id_text = str(message_id)
+        message_id += 1
+
+        rpc_attrs = [("message-id", str(message_id_text))]
+        root = xml.Node("rpc", [(None, NS_NC_1_1)], None, rpc_attrs, [content], None, None)
+
+        buf: Buffer = Buffer()
+        buf.write_str(xml.encode(root))
+
+        rpc_cbs[message_id_text] = callback
+        _send_message(buf)
+
+    def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
+        log.info("NETCONF get-config")
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        rpc(xml.Node("get-config", nc_nsdefs, children=[
+            xml.Node("source", children=[
+                xml.Node(datastore)
+            ]),
+        ]), cb)
+
+    def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
+        log.info("NETCONF edit-config", {"datastore": datastore})
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        rpc(xml.Node("edit-config", nc_nsdefs, children=[
+            xml.Node("target", children=[
+                xml.Node(datastore)
+            ]),
+            xml.Node("config", text=config)
+        ]), cb)
+
+    def commit(cb: action(Client, ?xml.Node) -> None) -> None:
+        log.info("NETCONF commit", {})
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        rpc(xml.Node("commit", nc_nsdefs), cb)
+
+    def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
+        action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
+        rpc(action_node, callback)
+
+    def send_hello() -> None:
+        hello = """<?xml version="1.0" encoding="UTF-8"?>
+        <hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+            <capabilities>
+                <capability>urn:ietf:params:netconf:base:1.0</capability>
+                <capability>urn:ietf:params:netconf:base:1.1</capability>
+            </capabilities>
+        </hello>"""
+        buf: Buffer = Buffer()
+        buf.write_str(hello)
+        _send_message(buf)
+
+    def handle_msg(msg: str) -> None:
+        log.trace("MSG:", {"msg": msg})
+        # try:
+        root = xml.decode(msg) # TODO: Modify xml.decode to return error OR catch exception when supported by actonc
+        # except Exception:
+        #     pass # TODO
+        if root.tag == "notification": # TODO: check namespace as well?
+            _on_msg_notification(root)
+        elif root.tag == "rpc-reply": # TODO: check namespace as well?
+            _on_msg_rpc_reply(root)
+        elif root.tag == "hello": # TODO: check namespace as well?
+            _on_msg_hello(root)
+        else:
+            log.warning("Unhandled message type:", {"root.tag": root.tag})
+
+    def _on_msg_hello(root: xml.Node) -> None:
+        for n in root.children:
+            if n.tag == "capabilities": # TODO: check namespace as well?
+                capabilities.clear()
+                for cap in n.children:
+                    if cap.tag == "capability": # TODO: check namespace as well?
+                        cap_body = cap.text # cap_body = cap.text.strip()
+                        _on_capability(cap)
+                    else:
+                        pass # TODO: Warn?
+            elif n.tag == "session-id": # TODO: check namespace as well?
+                session_id = n.text
+        on_connect(self)
+
+    def _on_capability(cap: xml.Node) -> None:
+        cap_text = cap.text # cap_text = cap.text.strip()
+        if cap_text is not None:
+            capabilities.append(cap_text)
+            if cap_text == CAP_NC_1_1:
+                log.debug("NETCONF 1.1 supported, switching to chunked framing")
+                framing = CHUNKED_FRAMING
+
+    def _on_msg_rpc_reply(root: xml.Node) -> None:
+        msg_id: ?str = None
+        for attr_name, attr_val in root.attributes:
+            if attr_name.split(":", -1)[-1] == "message-id": # TODO: check prefix->namespace as well
+                msg_id = attr_val
+                break
+
+        if msg_id is not None:
+            try:
+                _cb = rpc_cbs[msg_id]
+                del rpc_cbs[msg_id]
+                _cb(self, root)
+            except:
+                log.debug("Received rpc-reply with unexpected message-id", {"msg_id": msg_id})
+        else:
+            log.debug("Received rpc-reply without message-id", None)
+
+    def _on_msg_notification(root: xml.Node) -> None:
+        _on_notif = on_notif
+        if _on_notif is not None:
+            _on_notif(self, root)
+
+    def p_on_stdout(p, data: bytes) -> None:
+        #log.trace("DATA:", {"data": data})
+        recv_buf.write_bytes(data)
+        try_read: bool = True
+        # while recv_buf.has_unread_bytes() and try_read: # actonc: Name try_read is not in scope
+        while recv_buf.has_unread_bytes():
+            if not try_read:
+                break
+            if framing == SEPARATOR_FRAMING:
+                try_read = _on_legacy_msg_data()
+            elif framing == CHUNKED_FRAMING:
+                try_read = _on_chunked_msg_data()
+            else:
+                try_read = False
+                _on_session_defunct_error("Framing type " + str(framing) + ": Not Implemented")
+
+    def _on_legacy_msg_data() -> bool:
+        i = recv_buf.find_bytes(LEGACY_SEPARATOR_BYTES)
+        if isinstance(i, int):
+            _msg_data = recv_buf.read_bytes(i)
+            if isinstance(_msg_data, bytes):
+                recv_buf.skip_bytes(len(LEGACY_SEPARATOR_BYTES))
+                recv_buf.consume()
+                handle_msg(_msg_data.decode())
+                return True
+        recv_buf.rewind()
+        return False
+
+    def _on_chunked_msg_data() -> bool:
+        m = recv_buf.match_bytes(CHUNK_TAG_PREFIX)
+        if isinstance(m, IncompleteReadError):
+            recv_buf.rewind()
+            return False
+        elif isinstance(m, bool):
+            if not m:
+                _on_session_defunct_error("Invalid chunk framing data.")
+                return False
+            _len_text_len = recv_buf.find_bytes(CHUNK_TAG_POSTFIX)
+            if isinstance(_len_text_len, IncompleteReadError):
+                recv_buf.rewind()
+                return False
+            elif isinstance(_len_text_len, int):
+                _len_text = recv_buf.read_bytes(_len_text_len)
+
+                _skip = recv_buf.skip_bytes(len(CHUNK_TAG_POSTFIX))
+                if isinstance(_skip, IncompleteReadError):
+                    recv_buf.rewind()
+                    return False
+                elif isinstance(_skip, bool) and _skip:
+                    if isinstance(_len_text, bytes):
+                        if _len_text == CHUNK_TAG_END_OF_MSG:
+                            _msg_data = chunk_buf.read_all_bytes()
+                            chunk_buf.consume()
+                            handle_msg(_msg_data.decode())
+                            return True
+                        else:
+                            try:
+                                l = int(_len_text.decode())
+                                chunk = recv_buf.read_bytes(l)
+                                chunk_buf.write_bytes(chunk)
+                                recv_buf.consume()
+                                return True
+                            except IncompleteReadError:
+                                recv_buf.rewind()
+                                return False
+        _on_session_defunct_error("Internal error")
+        return False
+
+    def _on_session_defunct_error(msg: str):
+        close()
+        on_error(self, msg)
+
+    p = process.Process(process.ProcessCap(auth), cmd, p_on_stdout, p_on_stderr, p_on_exit, p_on_error, env=cmd_env)
+    send_hello()
+
+class NsMaps(object):
+    @property
+    nsmap: dict[str, str]
+    @property
+    parent: ?NsMaps
+
+    def __init__(self, namespaces: list[(?str, str)], parent: ?NsMaps):
+        _nsmap: dict[str, str] = {}
+        for _prefix, _ns in namespaces:
+            _nsmap[_prefix if _prefix is not None else ""] = _ns
+        self.nsmap = _nsmap
+
+    def lookup(self, prefix: ?str) -> ?str:
+        _inst = self
+        while True:
+            ns: ?str = self.nsmap.get(prefix if prefix is not None else "", None)
+            if ns is not None:
+                return ns
+            _parent = _inst.parent
+            if _parent is not None:
+                _inst = _parent
+            else:
+                return None
+
+class IncompleteReadError(Exception):
+    def __init__(self):
+        pass
+
+class Buffer(object):
+    @property
+    parts: list[bytes]
+    @property
+    i: int
+    @property
+    j: int
+    @property
+    total_bytes: int
+    @property
+    unread_bytes: int
+
+    def __init__(self):
+        self.parts = []
+        self.i = 0
+        self.j = 0
+        self.total_bytes = 0
+        self.unread_bytes = 0
+
+    def write_bytes(self, data: bytes):
+        l = len(data)
+        self.parts.append(data)
+        self.total_bytes += l
+        self.unread_bytes += l
+
+    def write_str(self, data: str):
+        self.write_bytes(data.encode())
+
+    def consume(self):
+        #print("CONSUME!", self.i, self.j)
+        if self.i > 0:
+            # TODO: use a queue rather then list, i.e. parts: queue[bytes] to avoid copying/moving all elements in list
+            self.parts = self.parts[self.i:]
+            self.i = 0
+        if self.j > 0:
+            if len(self.parts) > 0:
+                #self.parts[0] = self.parts[0][self.j:]
+                parts: list[bytes] = self.parts # Workaround type-checker bug?
+                parts[0] = parts[0][self.j:]
+            self.j = 0
+        self.total_bytes = self.unread_bytes
+        #print("CONSUMED!", self.parts)
+
+    def rewind(self):
+        #print("REWIND!")
+        self.i = 0
+        self.j = 0
+        self.unread_bytes = self.total_bytes
+
+    def read_bytes_count(self) -> int:
+        return self.total_bytes - self.unread_bytes
+
+    def has_unread_bytes(self) -> bool:
+        return self.unread_bytes > 0
+
+    def assert_unread_bytes(self, count: int) -> value: # (bool | IncompleteReadError)
+        # if self.unread_bytes < count:
+        #     raise IncompleteReadError()
+        if self.unread_bytes < count:
+            return IncompleteReadError()
+        else:
+            return True
+
+    def read_bytes(self, count: int) -> bytes: # (bytes | IncompleteReadError)
+        #print("READ", count)
+        #print("READ0!", self.i, self.j)
+        if count > self.unread_bytes:
+            raise IncompleteReadError()
+        remaining = count
+        acc = []
+        parts: list[bytes] = self.parts # Workaround type-checker bug?
+        while remaining > 0:
+            #part = self.parts[self.i]
+            part = parts[self.i]
+            next_j = self.j + remaining
+            chunk = part[self.j:next_j]
+            chunk_len = len(chunk)
+            remaining -= chunk_len
+            if next_j >= len(part):
+                self.i += 1
+                next_j = 0
+            self.j = next_j
+            acc.append(chunk)
+        self.unread_bytes -= count
+        #print("READ1!", self.i, self.j)
+        return bytes([]).join(acc)
+
+    def read_all_bytes(self) -> bytes:
+        b = self.read_bytes(self.unread_bytes)
+        if isinstance(b, bytes):
+            return b
+        else:
+            return bytes([])
+
+    def skip_bytes(self, count: int) -> value: # (bool | IncompleteReadError):
+        #print("SKIP", count)
+        #print("SKIP0!", self.i, self.j)
+        if count > self.unread_bytes:
+            return IncompleteReadError()
+        remaining = count
+        parts: list[bytes] = self.parts # Workaround type-checker bug?
+        while remaining > 0:
+            #part = self.parts[self.i]
+            part = parts[self.i]
+            part_len = len(part)
+            part_remain = part_len - self.j
+            if remaining < part_remain:
+                self.j += remaining
+                break
+            remaining -= part_remain
+            self.i += 1
+            self.j = 0
+        self.unread_bytes -= count
+        #print("SKIP0!", self.i, self.j)
+        return True
+
+    def find_bytes(self, pattern: bytes) -> value: # (index: int | err: IncompleteReadError)
+        index: int = 0
+        pattern_index: int = 0
+        _i = self.i
+        _j = self.j
+        pattern_len = len(pattern)
+        if pattern_len == 0:
+            return index
+        elif pattern_len > self.unread_bytes:
+            return IncompleteReadError()
+
+        parts: list[bytes] = self.parts # Workaround type-checker bug?
+        parts_len = len(parts)
+        part = parts[_i]
+        part_len = len(part)
+        while True:
+            b = part[_j]
+
+            if b == pattern[pattern_index]:
+                pattern_index += 1
+
+            index += 1
+
+            if pattern_index == pattern_len:
+                #return index - pattern_len
+                break
+
+            _j += 1
+            if _j >= part_len:
+                _i += 1
+                _j = 0
+                if _i >= parts_len:
+                    return IncompleteReadError()
+                part = parts[_i]
+                part_len = len(part)
+
+        return index - pattern_len
+
+    def match_bytes(self, pattern: bytes) -> value: # (is_match: bool | err: IncompleteReadError)
+        b = self.read_bytes(len(pattern))
+        if isinstance(b, bytes):
+            return b == pattern
+        else:
+            return b
