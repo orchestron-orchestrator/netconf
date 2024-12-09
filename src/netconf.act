@@ -81,6 +81,9 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     cmd += [address, "-s", "netconf"]
     #log.trace("Try process: " + str(cmd))
 
+    def get_capabilities() -> list[str]:
+        return capabilities
+
     def close() -> None:
         _p = p
         if _p is not None:
@@ -141,7 +144,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
             xml.Node("target", children=[
                 xml.Node(datastore)
             ]),
-            xml.Node("config", text=config)
+            xml.Node("config", [("xc", "urn:ietf:params:xml:ns:netconf:base:1.0")], text=config)
         ]), cb)
 
     def commit(cb: action(Client, ?xml.Node) -> None) -> None:
