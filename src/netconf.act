@@ -150,6 +150,11 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         nc_nsdefs = [(None, NS_NC_1_1)]
         rpc(xml.Node("commit", nc_nsdefs), cb)
 
+    def discard_changes(cb: action(Client, ?xml.Node) -> None) -> None:
+        _log.info("NETCONF discard-changes", {})
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        rpc(xml.Node("discard-changes", nc_nsdefs), cb)
+
     def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
         rpc(action_node, callback)
