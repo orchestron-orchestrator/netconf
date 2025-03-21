@@ -125,6 +125,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         buf.write_str(xml.encode(root))
 
         rpc_cbs[message_id_text] = callback
+        _log.debug("Sending RPC", {"message-id": message_id_text, "content": content})
         _send_message(buf)
 
     def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
@@ -173,19 +174,23 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         _send_message(buf)
 
     def handle_msg(msg: str) -> None:
+        if len(msg) == 0:
+            _log.debug("Ignoring empty message")
+            return
         _log.trace("MSG:", {"msg": msg})
-        # try:
-        root = xml.decode(msg) # TODO: Modify xml.decode to return error OR catch exception when supported by actonc
-        # except Exception:
-        #     pass # TODO
-        if root.tag == "notification": # TODO: check namespace as well?
-            _on_msg_notification(root)
-        elif root.tag == "rpc-reply": # TODO: check namespace as well?
-            _on_msg_rpc_reply(root)
-        elif root.tag == "hello": # TODO: check namespace as well?
-            _on_msg_hello(root)
-        else:
-            _log.warning("Unhandled message type:", {"root.tag": root.tag})
+        try:
+            root = xml.decode(msg)
+            if root.tag == "notification": # TODO: check namespace as well?
+                _on_msg_notification(root)
+            elif root.tag == "rpc-reply": # TODO: check namespace as well?
+                _on_msg_rpc_reply(root)
+            elif root.tag == "hello": # TODO: check namespace as well?
+                _on_msg_hello(root)
+            else:
+                _log.warning("Unhandled message type:", {"root.tag": root.tag})
+        except Exception as exc:
+            _log.error("Failed to parse XML", {"msg": msg, "exc": exc})
+            # TODO: I think we need to disconnect and start over, no?
 
     def _on_msg_hello(root: xml.Node) -> None:
         for n in root.children:
@@ -217,12 +222,12 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
                 break
 
         if msg_id is not None:
-            try:
-                _cb = rpc_cbs[msg_id]
-                del rpc_cbs[msg_id]
+            _cb = rpc_cbs.pop(msg_id)
+            if _cb is not None:
+                _log.debug("Received rpc-reply", {"msg-id": msg_id})
                 _cb(self, root)
-            except:
-                _log.debug("Received rpc-reply with unexpected message-id", {"msg_id": msg_id})
+            else:
+                _log.debug("Received rpc-reply with unexpected message-id", {"msg-id": msg_id})
         else:
             _log.debug("Received rpc-reply without message-id", None)
 
