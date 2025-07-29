@@ -313,16 +313,9 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     send_hello()
 
 class NsMaps(object):
-    @property
-    nsmap: dict[str, str]
-    @property
-    parent: ?NsMaps
-
     def __init__(self, namespaces: list[(?str, str)], parent: ?NsMaps):
-        _nsmap: dict[str, str] = {}
-        for _prefix, _ns in namespaces:
-            _nsmap[_prefix if _prefix is not None else ""] = _ns
-        self.nsmap = _nsmap
+        self.nsmap = {_prefix if _prefix is not None else "": _ns for _prefix, _ns in namespaces}
+        self.parent = parent
 
     def lookup(self, prefix: ?str) -> ?str:
         _inst = self
@@ -338,7 +331,7 @@ class NsMaps(object):
 
 class IncompleteReadError(Exception):
     def __init__(self):
-        pass
+        self.error_message = "Not enough data to read from buffer"
 
 class Buffer(object):
     @property
