@@ -10,21 +10,23 @@
 #
 # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
+"""NETCONF client
+"""
 
 import logging
 import net
 import process
+import testing
 import xml
 
-"""Netconf client"""
+import ssh_client
 
 SEPARATOR_FRAMING: int = 0
 CHUNKED_FRAMING: int = 1
 
 CHUNK_SIZE_MAX: int = 4294967295
 
-LEGACY_SEPARATOR_STR: str = "]]>]]>"
-LEGACY_SEPARATOR_BYTES: bytes = LEGACY_SEPARATOR_STR.encode()
+LEGACY_SEPARATOR: bytes = "]]>]]>".encode()
 
 CHUNK_TAG_PREFIX: bytes = "\n#".encode()
 CHUNK_TAG_END_OF_MSG: bytes = "#".encode()
@@ -35,9 +37,43 @@ CAP_NC_1_1 = "urn:ietf:params:netconf:base:1.1"
 NS_NC_1_1 = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NS_YANG_ACTION = "urn:ietf:params:xml:ns:yang:1"
 
+# TODO: I think this should be in __builtin__
+class UnreachableError(Exception):
+    pass
+
+# TODO: move these to __builtin__
+class ConnectionError(OSError):
+    pass
+
+class BrokenPipeError(ConnectionError):
+    pass
+
+class ConnectionAbortedError(ConnectionError):
+    pass
+
+class ConnectionRefusedError(ConnectionError):
+    pass
+
+class ConnectionResetError(ConnectionError):
+    pass
+
+class NetconfError(Exception):
+    pass
+
+STATE_NONE          = 0
+STATE_CONNECTING    = 1
+STATE_CONNECTED     = 2
+STATE_DISCONNECTING = 3
+
+state_name = {
+    STATE_NONE:          "none",
+    STATE_CONNECTING:    "connecting",
+    STATE_CONNECTED:     "connected",
+    STATE_DISCONNECTING: "disconnecting"
+}
+
 actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?str, key: ?str,
-        on_connect: action(Client) -> None,
-        on_error: action(Client, str) -> None,
+        on_connect: action(Client, ?Exception) -> None,
         on_notif: ?action(Client, xml.Node) -> None,
         log_handler: ?logging.Handler):
 
@@ -54,65 +90,68 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     var message_id = 1
     var rpc_cbs: dict[str, action(Client, ?xml.Node) -> None] = {}
 
-    var p: ?process.Process = None
-
-    def p_on_stderr(p, data: ?bytes):
-        if data is not None:
-            _log.debug("STDERR", {"data": data})
-
-    def p_on_exit(p, exit_code, term_signal):
-        _log.debug("SSH process exited", {"exit_code": exit_code, "term_signal": term_signal})
-
-    def p_on_error(p, error):
-        _log.debug("Error from process", {"error": error})
-
-    cmd_env = None
-    if key is not None:
-        cmd = ["ssh", "-p", str(port), "-l", username, "-i", key]
-    elif password is not None:
-        cmd_env = {"SSHPASS": password}
-        #cmd = ["/usr/bin/env", "sshpass", "-e", "/usr/bin/ssh", "-p", str(port), "-l", username]
-        #cmd = ["/usr/bin/sshpass", "-e", "/usr/bin/ssh", "-p", str(port), "-l", username]
-        # TODO: do something better than accepting all new host keys!
-        cmd = ["sshpass", "-e", "ssh", "-o", "StrictHostKeyChecking=no", "-p", str(port), "-l", username]
-    else:
-        cmd = ["/usr/bin/ssh", "-p", str(port), "-l", username]
-    cmd += [address, "-s", "netconf"]
-    #log.trace("Try process: " + str(cmd))
+    var c: ?ssh_client.Client = None
+    var state = STATE_NONE
 
     def get_capabilities() -> list[str]:
         return capabilities
 
-    def close() -> None:
-        _p = p
-        if _p is not None:
-            _p.stop()
-            p = None
+    # TODO: Close protocol
+    def close(cb: ?action() -> None) -> None:
         for rpc_cb in rpc_cbs.values():
             rpc_cb(self, None)
         #rpc_cbs.clear()
         rpc_cbs = {}
 
+        if c is not None:
+            c.close(cb)
+        else:
+            if cb is not None:
+                cb()
+
+    # TODO: Restart protocol
+    def restart() -> None:
+        _log.info("Restarting")
+        for rpc_cb in rpc_cbs.values():
+            rpc_cb(self, None)
+
+        framing = SEPARATOR_FRAMING
+        recv_buf = Buffer()
+        chunk_buf = Buffer()
+
+        session_id = None
+        capabilities = []
+
+        message_id = 1
+        rpc_cbs = {}
+
+        state = STATE_NONE
+
+        if c is not None:
+            c.restart()
+        else:
+            _log.warning("Cannot restart, SSH client is not running")
+
     def _send_message(data: Buffer) -> None:
-        if p is not None:
+        if c is not None:
             if framing == SEPARATOR_FRAMING:
-                data.write_bytes(LEGACY_SEPARATOR_BYTES)
+                data.write_bytes(LEGACY_SEPARATOR)
                 _msg = data.read_all_bytes()
                 _log.trace("Sending message", {"msg": _msg})
-                p.write(_msg)
+                c.write(_msg)
             elif framing == CHUNKED_FRAMING:
                 while True:
                     chunk_size = CHUNK_SIZE_MAX if data.unread_bytes > CHUNK_SIZE_MAX else data.unread_bytes
                     if chunk_size <= 0:
-                        p.write("\n##\n".encode())
+                        c.write("\n##\n".encode())
                         break
 
                     _chunk = data.read_bytes(chunk_size)
                     _log.trace("Sending chunk", {"chunk_size": chunk_size, "chunk": _chunk})
-                    p.write(("\n#" + str(chunk_size) + "\n").encode())
-                    p.write(_chunk)
+                    c.write(("\n#" + str(chunk_size) + "\n").encode())
+                    c.write(_chunk)
         else:
-            _on_session_defunct_error("Connection closed")
+            on_connect(self, BrokenPipeError("Cannot send message, SSH process is not running"))
 
     def rpc(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
         message_id_text = str(message_id)
@@ -161,7 +200,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
         rpc(action_node, callback)
 
-    def send_hello() -> None:
+    def _send_hello() -> None:
         hello = """<?xml version="1.0" encoding="UTF-8"?>
         <hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
             <capabilities>
@@ -204,7 +243,8 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
                         pass # TODO: Warn?
             elif n.tag == "session-id": # TODO: check namespace as well?
                 session_id = n.text
-        on_connect(self)
+        state = "CONNECTED"
+        on_connect(self, None)
 
     def _on_capability(cap: xml.Node) -> None:
         cap_text = cap.text # cap_text = cap.text.strip()
@@ -236,29 +276,12 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         if _on_notif is not None:
             _on_notif(self, root)
 
-    def p_on_stdout(p, data: ?bytes) -> None:
-        if data is not None:
-            #_log.trace("DATA:", {"data": data})
-            recv_buf.write_bytes(data)
-            try_read: bool = True
-            # while recv_buf.has_unread_bytes() and try_read: # actonc: Name try_read is not in scope
-            while recv_buf.has_unread_bytes():
-                if not try_read:
-                    break
-                if framing == SEPARATOR_FRAMING:
-                    try_read = _on_legacy_msg_data()
-                elif framing == CHUNKED_FRAMING:
-                    try_read = _on_chunked_msg_data()
-                else:
-                    try_read = False
-                    _on_session_defunct_error("Framing type " + str(framing) + ": Not Implemented")
-
     def _on_legacy_msg_data() -> bool:
-        i = recv_buf.find_bytes(LEGACY_SEPARATOR_BYTES)
+        i = recv_buf.find_bytes(LEGACY_SEPARATOR)
         if isinstance(i, int):
             _msg_data = recv_buf.read_bytes(i)
             if isinstance(_msg_data, bytes):
-                recv_buf.skip_bytes(len(LEGACY_SEPARATOR_BYTES))
+                recv_buf.skip_bytes(len(LEGACY_SEPARATOR))
                 recv_buf.consume()
                 handle_msg(_msg_data.decode())
                 return True
@@ -272,7 +295,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
             return False
         elif isinstance(m, bool):
             if not m:
-                _on_session_defunct_error("Invalid chunk framing data.")
+                on_connect(self, NetconfError("Invalid chunk framing data"))
                 return False
             _len_text_len = recv_buf.find_bytes(CHUNK_TAG_POSTFIX)
             if isinstance(_len_text_len, IncompleteReadError):
@@ -302,15 +325,47 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
                             except IncompleteReadError:
                                 recv_buf.rewind()
                                 return False
-        _on_session_defunct_error("Internal error")
-        return False
+        # TODO: FIXME: match_bytes should always return bytes or raise exception
+        raise UnreachableError("Unexpected state in _on_chunked_msg_data")
 
-    def _on_session_defunct_error(msg: str):
-        close()
-        on_error(self, msg)
+    def _on_receive(c, data: bytes):
+        #_log.trace("DATA:", {"data": data})
+        recv_buf.write_bytes(data)
+        try_read: bool = True
+        # while recv_buf.has_unread_bytes() and try_read: # actonc: Name try_read is not in scope
+        while recv_buf.has_unread_bytes():
+            if not try_read:
+                break
+            if framing == SEPARATOR_FRAMING:
+                try_read = _on_legacy_msg_data()
+            elif framing == CHUNKED_FRAMING:
+                try_read = _on_chunked_msg_data()
+            else:
+                try_read = False
+                on_connect(self, NetconfError("Unknown framing type: {framing}"))
 
-    p = process.Process(process.ProcessCap(auth), cmd, p_on_stdout, p_on_stderr, p_on_exit, p_on_error, env=cmd_env)
-    send_hello()
+    def _on_connect(c, err: ?Exception):
+        if err is not None:
+            _log.error("Failed to connect", {"err": err})
+            on_connect(self, err)
+        else:
+            _log.info("Connected", {"address": address, "port": port, "username": username})
+            state = STATE_CONNECTED
+            _send_hello()
+
+    def _connect():
+        c = ssh_client.Client(auth,
+                              on_connect=_on_connect,
+                              on_receive=_on_receive,
+                              address=address,
+                              username=username,
+                              key=None,
+                              password=password,
+                              port=port,
+                              subsystem="netconf",
+                              log_handler=log_handler)
+
+    _connect()
 
 class NsMaps(object):
     def __init__(self, namespaces: list[(?str, str)], parent: ?NsMaps):
@@ -493,3 +548,46 @@ class Buffer(object):
             return b == pattern
         else:
             return b
+
+
+################################################################################
+## Tests                                                                      ##
+################################################################################
+#
+# These test cases can be run with `acton test` but they require a running SSH
+# server, for example `docker run -td -P ghcr.io/notconf/notconf` - grab the
+# port and update test_port below, i.e.:
+# - docker run -td --name notconf -P ghcr.io/notconf/notconf
+# - docker inspect notconf | jq -r '.[0].NetworkSettings.Ports["830/tcp"][0].HostPort'
+# - update test_port below with the port from the above command
+# - acton test
+
+test_port = 32776
+test_address = "localhost"
+test_username = "admin"
+test_password = "admin"
+
+
+actor _test_netconf(t: testing.EnvT):
+    """Test SSH client towards a NETCONF server, like notconf
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            if "urn:ietf:params:netconf:base:1.1"in c.get_capabilities():
+                log.info("Got NETCONF 1.1 capability, looks reasonable, test success")
+                t.success()
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                address=test_address,
+                username="admin",
+                key=None,
+                password="admin",
+                port=test_port,
+                log_handler=t.log_handler)
