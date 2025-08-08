@@ -375,7 +375,7 @@ class NsMaps(object):
     def lookup(self, prefix: ?str) -> ?str:
         _inst = self
         while True:
-            ns: ?str = self.nsmap.get(prefix if prefix != None else "")
+            ns: ?str = self.nsmap.get(prefix if prefix is not None else "")
             if ns is not None:
                 return ns
             _parent = _inst.parent
