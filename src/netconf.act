@@ -596,9 +596,14 @@ actor _test_netconf(t: testing.EnvT):
             t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
         else:
             log.info("Connected to NETCONF server")
-            if "urn:ietf:params:netconf:base:1.1"in c.get_capabilities():
-                log.info("Got NETCONF 1.1 capability, looks reasonable, test success")
-                t.success()
+            for cap in c.get_capabilities():
+                if cap.startswith("urn:ietf:params:netconf:base:1"):
+                    log.info("Got NETCONF {cap} capability, looks reasonable, hello success")
+                    c.get_config(_on_get_config)
+
+    def _on_get_config(c: Client, result: ?xml.Node):
+        log.info("<get-config> success")
+        t.success()
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
