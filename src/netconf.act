@@ -562,7 +562,7 @@ class Buffer(object):
 # - update test_port below with the port from the above command
 # - acton test
 
-test_port = 32776
+test_port = 42830
 test_address = "localhost"
 test_username = "admin"
 test_password = "admin"
@@ -586,8 +586,8 @@ actor _test_netconf(t: testing.EnvT):
     c = Client(t.env.auth,
                 on_connect=_on_connect,
                 address=test_address,
-                username="admin",
+                username=test_username,
                 key=None,
-                password="admin",
+                password=test_password,
                 port=test_port,
                 log_handler=t.log_handler)

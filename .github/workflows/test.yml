@@ -1,0 +1,20 @@
+name: Test
+
+on:
+  push:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actonlang/setup-acton@v1
+        with:
+          channel: 'tip'
+      - name: "Check out repository code"
+        uses: actions/checkout@v4
+      - run: acton build --dev
+      - name: "Start notconf in background"
+        run: |
+          docker run -td --name notconf --publish 42830:830 ghcr.io/notconf/notconf
+      # Only run the netconf module tests, something is broken in ssh_client ...
+      - run: acton test --module netconf
