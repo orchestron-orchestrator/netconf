@@ -87,6 +87,17 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     var session_id: ?str = None
     var capabilities: list[str] = []
 
+    # Track namespace prefix for Juniper rfc-compliant mode (None for normal
+    # mode). When this mode is enabled on a Junos device, the RPC replies will:
+    # - Explicitly bind each XML node and attribute namespace to
+    #   "nc=urn:ietf:params:xml:ns:netconf:base:1.0" instead of providing the
+    #   default namespace on the top element.
+    # - Use <configuration xmlns="http://yang.juniper.net/junos/conf/root" ...>
+    #   in the <get-config> response, aligning the namespace with the YANG
+    #   module we use in orchestron
+    # https://www.juniper.net/documentation/us/en/software/junos/netconf/topics/concept/netconf-session-rfc-compliant.html
+    var nc_prefix: ?str = None
+
     var message_id = 1
     var rpc_cbs: dict[str, action(Client, ?xml.Node) -> None] = {}
 
@@ -157,8 +168,13 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         message_id_text = str(message_id)
         message_id += 1
 
-        rpc_attrs = [("message-id", str(message_id_text))]
-        root = xml.Node("rpc", [(None, NS_NC_1_1)], None, rpc_attrs, [content], None, None)
+        # Use prefixed attribute name if in RFC-compliant mode
+        if nc_prefix is not None:
+            rpc_attrs = [(nc_prefix + ":message-id", str(message_id_text))]
+        else:
+            rpc_attrs = [("message-id", str(message_id_text))]
+
+        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_1)], nc_prefix, rpc_attrs, [content], None, None)
 
         buf: Buffer = Buffer()
         buf.write_str(xml.encode(root))
@@ -169,32 +185,32 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF get-config")
-        nc_nsdefs = [(None, NS_NC_1_1)]
-        rpc(xml.Node("get-config", nc_nsdefs, children=[
-            xml.Node("source", children=[
-                xml.Node(datastore)
+        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=[
+            xml.Node("source", [], nc_prefix, children=[
+                xml.Node(datastore, [], nc_prefix)
             ]),
         ]), cb)
 
     def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF edit-config", {"datastore": datastore})
-        nc_nsdefs = [(None, NS_NC_1_1)]
-        rpc(xml.Node("edit-config", nc_nsdefs, children=[
-            xml.Node("target", children=[
-                xml.Node(datastore)
+        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        rpc(xml.Node("edit-config", nc_nsdefs, nc_prefix, children=[
+            xml.Node("target", [], nc_prefix, children=[
+                xml.Node(datastore, [], nc_prefix)
             ]),
-            xml.Node("config", [("xc", "urn:ietf:params:xml:ns:netconf:base:1.0")], text=config)
+            xml.Node("config", [], nc_prefix, text=config)
         ]), cb)
 
     def commit(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF commit", {})
-        nc_nsdefs = [(None, NS_NC_1_1)]
-        rpc(xml.Node("commit", nc_nsdefs), cb)
+        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        rpc(xml.Node("commit", nc_nsdefs, nc_prefix), cb)
 
     def discard_changes(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF discard-changes", {})
-        nc_nsdefs = [(None, NS_NC_1_1)]
-        rpc(xml.Node("discard-changes", nc_nsdefs), cb)
+        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        rpc(xml.Node("discard-changes", nc_nsdefs, nc_prefix), cb)
 
     def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
@@ -219,6 +235,17 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         _log.trace("MSG:", {"msg": msg})
         try:
             root = xml.decode(msg)
+
+            # Detect/update RFC-compliant mode from any message's namespace prefix
+            root_prefix = root.prefix
+            if root_prefix is not None and root_prefix != nc_prefix:
+                prev_prefix = nc_prefix
+                nc_prefix = root_prefix
+                _log.info("Detected RFC-compliant mode change", {"previous": prev_prefix, "new": nc_prefix})
+            elif root_prefix is None and nc_prefix is not None:
+                _log.info("Server switched to non-RFC-compliant mode")
+                nc_prefix = None
+
             if root.tag == "notification": # TODO: check namespace as well?
                 _on_msg_notification(root)
             elif root.tag == "rpc-reply": # TODO: check namespace as well?
@@ -257,7 +284,12 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     def _on_msg_rpc_reply(root: xml.Node) -> None:
         msg_id: ?str = None
         for attr_name, attr_val in root.attributes:
-            if attr_name.split(":", -1)[-1] == "message-id": # TODO: check prefix->namespace as well
+            # Handle both "message-id" and "nc:message-id" attributes
+            if attr_name == "message-id" or attr_name == "nc:message-id":
+                msg_id = attr_val
+                break
+            # Also handle other potential namespace prefixes
+            elif attr_name.split(":", -1)[-1] == "message-id":
                 msg_id = attr_val
                 break
 
