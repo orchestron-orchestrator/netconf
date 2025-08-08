@@ -505,42 +505,59 @@ class Buffer(object):
         return True
 
     def find_bytes(self, pattern: bytes) -> value: # (index: int | err: IncompleteReadError)
-        index: int = 0
-        pattern_index: int = 0
-        _i = self.i
-        _j = self.j
         pattern_len = len(pattern)
         if pattern_len == 0:
-            return index
+            return 0
         elif pattern_len > self.unread_bytes:
             return IncompleteReadError()
 
-        parts: list[bytes] = self.parts # Workaround type-checker bug?
-        parts_len = len(parts)
-        part = parts[_i]
+        index = 0   # tracks the possible start of pattern
+        _i = self.i # current part (index of self.parts)
+        _j = self.j # current position in current part
+
+        # Check if we have any parts to search
+        if len(self.parts) == 0 or _i >= len(self.parts):
+            return IncompleteReadError()
+
+        part = self.parts[_i]
         part_len = len(part)
-        while True:
-            b = part[_j]
-
-            if b == pattern[pattern_index]:
+        while index <= self.unread_bytes - pattern_len:
+            pattern_index = 0
+            scan_i = _i
+            scan_j = _j
+            scan_part = part
+            scan_part_len = part_len
+            # Starting from index, scan the next pattern_len bytes for a pattern match
+            while pattern_index < pattern_len:
+                b = scan_part[scan_j]
+                if b != pattern[pattern_index]:
+                    break
                 pattern_index += 1
-
-            index += 1
+                scan_j += 1
+                if scan_j >= scan_part_len:
+                    scan_i += 1
+                    scan_j = 0
+                    if scan_i >= len(self.parts):
+                        # We've run out of parts while scanning
+                        break
+                    scan_part = self.parts[scan_i]
+                    scan_part_len = len(scan_part)
 
             if pattern_index == pattern_len:
-                #return index - pattern_len
-                break
+                # We matched all bytes in the pattern
+                return index
 
+            index += 1
             _j += 1
             if _j >= part_len:
                 _i += 1
                 _j = 0
-                if _i >= parts_len:
+                if _i >= len(self.parts):
                     return IncompleteReadError()
-                part = parts[_i]
+                part = self.parts[_i]
                 part_len = len(part)
 
-        return index - pattern_len
+        return IncompleteReadError()
 
     def match_bytes(self, pattern: bytes) -> value: # (is_match: bool | err: IncompleteReadError)
         b = self.read_bytes(len(pattern))
