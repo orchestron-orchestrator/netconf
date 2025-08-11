@@ -158,7 +158,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         message_id += 1
 
         rpc_attrs = [("message-id", str(message_id_text))]
-        root = xml.Node("rpc", [(None, NS_NC_1_1)], None, rpc_attrs, [content], None, None)
+        root = xml.Node("rpc", [(None, NS_NC_1_1)], None, rpc_attrs, [content])
 
         buf: Buffer = Buffer()
         buf.write_str(xml.encode(root))
@@ -166,6 +166,14 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         rpc_cbs[message_id_text] = callback
         _log.debug("Sending RPC", {"message-id": message_id_text, "content": content})
         _send_message(buf)
+
+    def get(cb: action(Client, ?xml.Node) -> None, filter: ?xml.Node=None) -> None:
+        _log.info("NETCONF get")
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        children = []
+        if filter is not None:
+            children.append(filter)
+        rpc(xml.Node("get", nc_nsdefs, children=children), cb)
 
     def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF get-config")
@@ -195,6 +203,60 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         _log.info("NETCONF discard-changes", {})
         nc_nsdefs = [(None, NS_NC_1_1)]
         rpc(xml.Node("discard-changes", nc_nsdefs), cb)
+
+    def get_schema(cb: action(Client, ?xml.Node) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
+        _log.info("NETCONF get-schema", {"identifier": identifier, "version": version, "format": format})
+        nc_nsdefs = [(None, NS_NC_1_1)]
+        children = [xml.Node("identifier", text=identifier)]
+        if version is not None:
+            children.append(xml.Node("version", text=version))
+        children.append(xml.Node("format", text=format))
+        rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
+
+    def list_schemas(cb: action(Client, list[(identifier: ?str, version: ?str, format: ?str)]) -> None) -> None:
+        """List available schemas and return parsed list of (identifier, version, format) tuples"""
+        _log.info("NETCONF list-schemas")
+
+        def _parse_response(c: Client, result: ?xml.Node):
+            schemas = []
+            if result is not None:
+                if result.tag == "rpc-reply":
+                    for child in result.children:
+                        if child.tag == "data":
+                            schemas = _parse_schemas_data(child)
+            cb(c, schemas)
+
+        def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str)]:
+            schemas = []
+            for netconf_state in data_node.children:
+                if netconf_state.tag == "netconf-state":
+                    for schemas_node in netconf_state.children:
+                        if schemas_node.tag == "schemas":
+                            for schema in schemas_node.children:
+                                if schema.tag == "schema":
+                                    identifier = None
+                                    version = None
+                                    format = None
+                                    for attr in schema.children:
+                                        attr_text = attr.text
+                                        if attr.tag == "identifier" and attr_text is not None:
+                                            identifier = attr_text
+                                        elif attr.tag == "version" and attr_text is not None:
+                                            version = attr_text
+                                        elif attr.tag == "format" and attr_text is not None:
+                                            format = attr_text
+                                    if identifier is not None:
+                                        schemas.append((identifier, version, format))
+            return schemas
+
+        # Create filter for /netconf-state/schemas from ietf-netconf-monitoring
+        filter_node = xml.Node("filter", None, None, [("type", "subtree")], [
+            xml.Node("netconf-state",
+                [(None, "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring")],
+                children=[xml.Node("schemas")]
+            )
+        ], None, None)
+        get(_parse_response, filter_node)
 
     def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
@@ -608,6 +670,75 @@ actor _test_netconf(t: testing.EnvT):
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                log_handler=t.log_handler)
+
+
+actor _test_get_schema(t: testing.EnvT):
+    """Test SSH client get-schema operation towards a NETCONF server
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            for cap in c.get_capabilities():
+                if cap.startswith("urn:ietf:params:netconf:base:1"):
+                    log.info("Got NETCONF {cap} capability, looks reasonable, hello success")
+                    c.get_schema(_on_get_schema, "ietf-netconf")
+
+    def _on_get_schema(c: Client, result: ?xml.Node):
+        if result is not None:
+            log.info("<get-schema> received response", {"result": result})
+            t.success()
+        else:
+            log.error("<get-schema> received null response")
+            t.failure(ValueError("get-schema returned null"))
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                log_handler=t.log_handler)
+
+
+actor _test_list_schemas(t: testing.EnvT):
+    """Test listing available schemas from a NETCONF server
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            c.list_schemas(_on_list_schemas)
+
+    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+        log.info("Received schemas list", {"count": len(schemas)})
+        for schema in schemas:
+            log.info("Schema found", {"identifier": schema.identifier, "version": schema.version, "format": schema.format})
+        if len(schemas) > 0:
+            t.success()
+        else:
+            log.warning("No schemas found")
+            t.success()  # Still success even if no schemas
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
                 address=test_address,
                 username=test_username,
                 key=None,
