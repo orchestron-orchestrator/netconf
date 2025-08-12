@@ -387,6 +387,7 @@ class NsMaps(object):
 class IncompleteReadError(Exception):
     def __init__(self):
         self.error_message = "Not enough data to read from buffer"
+        self.msg = "Not enough data to read from buffer"
 
 class Buffer(object):
     @property
