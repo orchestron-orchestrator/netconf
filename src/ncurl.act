@@ -1,0 +1,238 @@
+#!/usr/bin/env acton
+"""ncurl - NETCONF URL tool
+
+A command-line tool for interacting with NETCONF devices, like curl but for
+NETCONF. Maybe one day we'll do RESTCONF and gNMI (the other YANG-based
+transports), and then we'll be network curl.
+"""
+
+import argparse
+import file
+import logging
+import netconf
+import xml
+
+
+actor CmdListSchemas(env, args):
+    """List available schemas from a NETCONF server"""
+
+    host = args.get_str("host")
+    port = args.get_int("port")
+    username = args.get_str("username")
+    password = args.get_str("password")
+
+    var schemas_found = []
+
+    def _on_connect(c: netconf.Client, e: ?Exception):
+        if e is not None:
+            print("Error: Failed to connect: {e}", err=True)
+            env.exit(1)
+        else:
+            c.list_schemas(_on_list_schemas)
+
+    def _on_list_schemas(c: netconf.Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+        for schema in schemas:
+            schemas_found.append(schema)
+
+        def _close_cb():
+            _display_schemas()
+
+        c.close(_close_cb)
+
+    def _display_schemas():
+        print("Available schemas:")
+        print("==================")
+        count = 0
+        for schema in schemas_found:
+            version_str = str(schema.version) if schema.version is not None else "N/A"
+            format_str = str(schema.format) if schema.format is not None else "N/A"
+            identifier_str = str(schema.identifier) if schema.identifier is not None else "N/A"
+            print("  {identifier_str:<40} {version_str:<15} {format_str}")
+            count += 1
+
+        print("\nTotal schemas: {count}")
+        env.exit(0)
+
+    c = netconf.Client(env.auth,
+                      on_connect=_on_connect,
+                      on_notif=None,
+                      address=host,
+                      username=username,
+                      key=None,
+                      password=password,
+                      port=port,
+                      log_handler=None)
+
+
+actor CmdGetSchema(env, args):
+    """Download schema(s) from a NETCONF server"""
+
+    host = args.get_str("host")
+    port = args.get_int("port")
+    username = args.get_str("username")
+    password = args.get_str("password")
+    identifier_str = args.get_str("identifier")
+    version_str = args.get_str("version")
+    version = version_str if version_str != "" else None
+    format = args.get_str("format")
+    output_dir = args.get_str("output-dir")
+
+    var schemas_to_download: list[(identifier: ?str, version: ?str, format: ?str)]= []
+    var current_download_index = 0
+    var client: ?netconf.Client = None
+
+    def _on_connect(c: netconf.Client, e: ?Exception):
+        if e is not None:
+            print("Error: Failed to connect: {e}", err=True)
+            env.exit(1)
+        else:
+            client = c
+            if identifier_str == "all":
+                # First get the list of schemas
+                c.list_schemas(_on_list_schemas_for_download)
+            else:
+                # Download single schema
+                schemas_to_download.append((identifier=identifier_str, version=version, format=format))
+                _download_next_schema()
+
+    def _on_list_schemas_for_download(c: netconf.Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+        # Only download yang format (not yin) to avoid duplicates
+        for schema in schemas:
+            # Only add schemas with valid identifiers and yang format
+            if schema.identifier is not None and schema.format == "yang":
+                schemas_to_download.append((identifier=schema.identifier, version=version, format=schema.format))
+
+        print("Found {len(schemas_to_download)} schemas to download")
+        _download_next_schema()
+
+    def _download_next_schema():
+        if current_download_index >= len(schemas_to_download):
+            print("\nAll schemas downloaded successfully!")
+            _close_and_exit()
+        else:
+            schema = schemas_to_download[current_download_index]
+
+            schema_identifier = schema.identifier
+            if schema_identifier is None:
+                print("Skipping schema with no identifier")
+                current_download_index += 1
+                _download_next_schema()
+                ident = ""
+                return
+            ident = schema_identifier if schema_identifier is not None else ""
+
+            print("Downloading [{current_download_index + 1}/{len(schemas_to_download)}]: {schema.identifier}")
+
+            c = client
+            if c is not None:
+                # Use "yang" as default format if not specified
+                format_str = schema.format if schema.format is not None else "yang"
+                c.get_schema(_on_get_schema, ident, schema.version, format_str)
+
+    def _on_get_schema(c: netconf.Client, result: ?xml.Node):
+        if current_download_index < len(schemas_to_download):
+            schema = schemas_to_download[current_download_index]
+
+            schema_data: ?str = None
+            if result is not None:
+                if result.tag == "rpc-reply":
+                    # Check for errors
+                    has_error = False
+                    for child in result.children:
+                        if child.tag == "rpc-error":
+                            has_error = True
+                            print("  Error downloading {schema.identifier}", err=True)
+                            break
+
+                    if not has_error:
+                        # Extract schema data
+                        for child in result.children:
+                            if child.tag == "data":
+                                schema_data = child.text
+                                break
+
+            if schema_data is not None:
+                # Build proper filename with identifier and version
+                # We already ensure identifier is not None before getting here
+                filename = "{schema.identifier}"
+                if schema.version is not None:
+                    filename = "{schema.identifier}@{schema.version}"
+                if schema.format is not None:
+                    filename = "{filename}.{schema.format}"
+                else:
+                    filename = "{filename}.yang"
+
+                filepath = "{output_dir}/{filename}"
+
+                # Write to file
+                f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), filepath)
+                f.write(schema_data.encode())
+                f.close()
+                print("  Saved to: {filepath}")
+            else:
+                print("  Warning: No data received for {schema.identifier}")
+
+        # Move to next schema
+        current_download_index += 1
+        _download_next_schema()
+
+    def _close_and_exit():
+        c = client
+        if c is not None:
+            def _close_cb():
+                env.exit(0)
+            c.close(_close_cb)
+        else:
+            env.exit(0)
+
+    # Connect and start the download process
+    netconf.Client(env.auth,
+                  on_connect=_on_connect,
+                  on_notif=None,
+                  address=host,
+                  username=username,
+                  key=None,
+                  password=password,
+                  port=port,
+                  log_handler=None)
+
+
+actor main(env):
+    def cmd_list_schemas(args):
+        """Command handler for list-schemas"""
+        CmdListSchemas(env, args)
+
+    def cmd_get_schema(args):
+        """Command handler for get-schema"""
+        CmdGetSchema(env, args)
+
+    def _parse_args():
+        p = argparse.Parser()
+
+        # Global options
+        p.add_option("host", "str", "?", "localhost", "NETCONF server hostname")
+        p.add_option("port", "int", "?", 42830, "NETCONF server port")
+        p.add_option("username", "str", "?", "admin", "Username for authentication")
+        p.add_option("password", "str", "?", "admin", "Password for authentication")
+
+        # Commands
+        p_list_schemas = p.add_cmd("list-schemas", "List available schemas", cmd_list_schemas)
+
+        p_get_schema = p.add_cmd("get-schema", "Download schema(s) from NETCONF server", cmd_get_schema)
+        p_get_schema.add_arg("identifier", "Schema identifier or 'all' to download all schemas", True, "?")
+        p_get_schema.add_option("version", "str", "?", "", "Schema version")
+        p_get_schema.add_option("format", "str", "?", "yang", "Schema format (yang or yin)")
+        p_get_schema.add_option("output-dir", "str", "?", "schemas", "Output directory for downloaded schemas")
+
+        return p.parse(env.argv)
+
+    try:
+        args = _parse_args()
+        cmd = args.cmd
+        if cmd is not None:
+            cmd(args)
+        else:
+            env.exit(0)
+    except argparse.ArgumentError as exc:
+        print(str(exc), err=True)
+        env.exit(1)
