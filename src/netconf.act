@@ -34,7 +34,7 @@ CHUNK_TAG_POSTFIX: bytes = "\n".encode()
 
 CAP_NC_1_1 = "urn:ietf:params:netconf:base:1.1"
 
-NS_NC_1_1 = "urn:ietf:params:xml:ns:netconf:base:1.0"
+NS_NC_1_0 = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NS_YANG_ACTION = "urn:ietf:params:xml:ns:yang:1"
 
 # TODO: I think this should be in __builtin__
@@ -181,7 +181,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         else:
             rpc_attrs = [("message-id", str(message_id_text))]
 
-        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_1)], nc_prefix, rpc_attrs, [content])
+        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_0)], nc_prefix, rpc_attrs, [content])
 
         buf: Buffer = Buffer()
         buf.write_str(xml.encode(root))
@@ -192,7 +192,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get(cb: action(Client, ?xml.Node) -> None, filter: ?xml.Node=None) -> None:
         _log.info("NETCONF get")
-        nc_nsdefs = [(None, NS_NC_1_1)]
+        nc_nsdefs = [(None, NS_NC_1_0)]
         children = []
         if filter is not None:
             children.append(filter)
@@ -200,7 +200,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF get-config")
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=[
             xml.Node("source", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
@@ -209,7 +209,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF edit-config", {"datastore": datastore})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("edit-config", nc_nsdefs, nc_prefix, children=[
             xml.Node("target", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
@@ -219,17 +219,83 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def commit(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF commit", {})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("commit", nc_nsdefs, nc_prefix), cb)
 
     def discard_changes(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF discard-changes", {})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("discard-changes", nc_nsdefs, nc_prefix), cb)
+
+    def lock(cb: action(Client, ?NetconfError) -> None, datastore: str) -> None:
+        _log.info("NETCONF lock", {"datastore": datastore})
+
+        def _parse_response(c: Client, result: ?xml.Node):
+            error: ?NetconfError = None
+            if result is not None:
+                if result.tag == "rpc-reply":
+                    for child in result.children:
+                        if child.tag == "rpc-error":
+                            error_msg = "Lock operation failed"
+                            for error_child in child.children:
+                                if error_child.tag == "error-message" and error_child.text is not None:
+                                    error_msg = error_child.text
+                                    break
+                            error = NetconfError(error_msg)
+                            break
+                        elif child.tag == "ok":
+                            # Success case
+                            break
+                else:
+                    error = NetconfError("Unexpected response type: " + result.tag)
+            else:
+                error = NetconfError("No response received for lock operation")
+
+            cb(c, error)
+
+        nc_nsdefs = [(None, NS_NC_1_0)]
+        rpc(xml.Node("lock", nc_nsdefs, children=[
+            xml.Node("target", children=[
+                xml.Node(datastore)
+            ])
+        ]), _parse_response)
+
+    def unlock(cb: action(Client, ?NetconfError) -> None, datastore: str) -> None:
+        _log.info("NETCONF unlock", {"datastore": datastore})
+
+        def _parse_response(c: Client, result: ?xml.Node):
+            error: ?NetconfError = None
+            if result is not None:
+                if result.tag == "rpc-reply":
+                    for child in result.children:
+                        if child.tag == "rpc-error":
+                            error_msg = "Unlock operation failed"
+                            for error_child in child.children:
+                                if error_child.tag == "error-message" and error_child.text is not None:
+                                    error_msg = error_child.text
+                                    break
+                            error = NetconfError(error_msg)
+                            break
+                        elif child.tag == "ok":
+                            # Success case
+                            break
+                else:
+                    error = NetconfError("Unexpected response type: " + result.tag)
+            else:
+                error = NetconfError("No response received for unlock operation")
+
+            cb(c, error)
+
+        nc_nsdefs = [(None, NS_NC_1_0)]
+        rpc(xml.Node("unlock", nc_nsdefs, children=[
+            xml.Node("target", children=[
+                xml.Node(datastore)
+            ])
+        ]), _parse_response)
 
     def get_schema(cb: action(Client, ?xml.Node) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
         _log.info("NETCONF get-schema", {"identifier": identifier, "version": version, "format": format})
-        nc_nsdefs = [(None, NS_NC_1_1)]
+        nc_nsdefs = [(None, NS_NC_1_0)]
         children = [xml.Node("identifier", text=identifier)]
         if version is not None:
             children.append(xml.Node("version", text=version))
@@ -776,6 +842,49 @@ actor _test_list_schemas(t: testing.EnvT):
         else:
             log.warning("No schemas found")
             t.success()  # Still success even if no schemas
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                log_handler=t.log_handler)
+
+
+actor _test_lock_unlock(t: testing.EnvT):
+    """Test lock and unlock operations on a datastore
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            # First lock the running datastore
+            c.lock(_on_lock, "running")
+
+    def _on_lock(c: Client, error: ?NetconfError):
+        if error is not None:
+            log.error("Lock operation failed", {"error": error})
+            t.failure(ValueError("Lock operation failed: {error}"))
+        else:
+            log.info("Lock operation successful")
+            # Now unlock the datastore
+            c.unlock(_on_unlock, "running")
+
+    def _on_unlock(c: Client, error: ?NetconfError):
+        if error is not None:
+            log.error("Unlock operation failed", {"error": error})
+            t.failure(ValueError("Unlock operation failed: {error}"))
+        else:
+            log.info("Unlock operation successful")
+            log.info("Lock and unlock test completed successfully")
+            t.success()
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
