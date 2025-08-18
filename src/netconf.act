@@ -89,13 +89,19 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     # Tracks explicit namespace prefix usage in NETCONF messages.
     # Client mirrors server's namespace declaration pattern: defaults to
-    # implicit namespace on root element, switches to explicit prefix
-    # when detected in server responses (e.g., Juniper RFC-compliant mode).
-    # https://www.juniper.net/documentation/us/en/software/junos/netconf/topics/concept/netconf-session-rfc-compliant.html
+    # implicit namespace on root element, switches to explicit prefix on all
+    # elements, including attributes, when detected in server responses. This is
+    # not a strict requirement per RFC 6241, but it is expected by Junos running
+    # RFC-compliant mode [1] - in particular the device will *not* include
+    # message-id in the replies if the attribute is sent without an explicit
+    # namespace prefix.
+    #
     # We always use the "urn:ietf:params:xml:ns:netconf:base:1.0" namespace when
     # creating xml.Node for tags. The nsdefs tuple (nc_prefix, NS_NC_1_1)
     # renders to either the default or explicit namespace declaration depending
     # nc_prefix.
+    #
+    # [1]: (https://www.juniper.net/documentation/us/en/software/junos/netconf/topics/concept/netconf-session-rfc-compliant.html)
     var nc_prefix: ?str = None
 
     var message_id = 1
