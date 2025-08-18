@@ -141,7 +141,15 @@ actor CmdGetSchema(env, args):
                     for child in result.children:
                         if child.tag == "rpc-error":
                             has_error = True
-                            print("  Error downloading {schema.identifier}", err=True)
+                            error_details = []
+                            for error_child in child.children:
+                                if error_child.tag == "error-message" and error_child.text is not None:
+                                    error_details.append("message: {error_child.text}")
+                                elif error_child.tag == "error-tag" and error_child.text is not None:
+                                    error_details.append("tag: {error_child.text}")
+                                elif error_child.tag == "error-type" and error_child.text is not None:
+                                    error_details.append("type: {error_child.text}")
+                            print("  Error downloading {schema.identifier}: {', '.join(error_details)}", err=True)
                             break
 
                     if not has_error:
