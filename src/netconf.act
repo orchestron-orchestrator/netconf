@@ -34,7 +34,7 @@ CHUNK_TAG_POSTFIX: bytes = "\n".encode()
 
 CAP_NC_1_1 = "urn:ietf:params:netconf:base:1.1"
 
-NS_NC_1_1 = "urn:ietf:params:xml:ns:netconf:base:1.0"
+NS_NC_1_0 = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NS_YANG_ACTION = "urn:ietf:params:xml:ns:yang:1"
 
 # TODO: I think this should be in __builtin__
@@ -181,7 +181,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
         else:
             rpc_attrs = [("message-id", str(message_id_text))]
 
-        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_1)], nc_prefix, rpc_attrs, [content])
+        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_0)], nc_prefix, rpc_attrs, [content])
 
         buf: Buffer = Buffer()
         buf.write_str(xml.encode(root))
@@ -192,7 +192,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get(cb: action(Client, ?xml.Node) -> None, filter: ?xml.Node=None) -> None:
         _log.info("NETCONF get")
-        nc_nsdefs = [(None, NS_NC_1_1)]
+        nc_nsdefs = [(None, NS_NC_1_0)]
         children = []
         if filter is not None:
             children.append(filter)
@@ -200,7 +200,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF get-config")
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=[
             xml.Node("source", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
@@ -209,7 +209,7 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF edit-config", {"datastore": datastore})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("edit-config", nc_nsdefs, nc_prefix, children=[
             xml.Node("target", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
@@ -219,17 +219,17 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def commit(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF commit", {})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("commit", nc_nsdefs, nc_prefix), cb)
 
     def discard_changes(cb: action(Client, ?xml.Node) -> None) -> None:
         _log.info("NETCONF discard-changes", {})
-        nc_nsdefs = [(nc_prefix, NS_NC_1_1)]
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         rpc(xml.Node("discard-changes", nc_nsdefs, nc_prefix), cb)
 
     def get_schema(cb: action(Client, ?xml.Node) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
         _log.info("NETCONF get-schema", {"identifier": identifier, "version": version, "format": format})
-        nc_nsdefs = [(None, NS_NC_1_1)]
+        nc_nsdefs = [(None, NS_NC_1_0)]
         children = [xml.Node("identifier", text=identifier)]
         if version is not None:
             children.append(xml.Node("version", text=version))
