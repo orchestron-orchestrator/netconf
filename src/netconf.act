@@ -295,7 +295,8 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
     def get_schema(cb: action(Client, ?xml.Node) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
         _log.info("NETCONF get-schema", {"identifier": identifier, "version": version, "format": format})
-        nc_nsdefs = [(None, NS_NC_1_0)]
+        # get-schema is part of ietf-netconf-monitoring, not base NETCONF
+        nc_nsdefs = [(None, "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring")]
         children = [xml.Node("identifier", text=identifier)]
         if version is not None:
             children.append(xml.Node("version", text=version))
