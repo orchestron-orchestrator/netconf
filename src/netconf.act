@@ -198,14 +198,17 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
             children.append(filter)
         rpc(xml.Node("get", nc_nsdefs, children=children), cb)
 
-    def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
+    def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running", filter: ?xml.Node=None) -> None:
         _log.info("NETCONF get-config")
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
-        rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=[
+        children = [
             xml.Node("source", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
-            ]),
-        ]), cb)
+            ])
+        ]
+        if filter is not None:
+            children.append(filter)
+        rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=children), cb)
 
     def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
         _log.info("NETCONF edit-config", {"datastore": datastore})
@@ -886,6 +889,149 @@ actor _test_lock_unlock(t: testing.EnvT):
             log.info("Unlock operation successful")
             log.info("Lock and unlock test completed successfully")
             t.success()
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                log_handler=t.log_handler)
+
+
+actor _test_get_config_with_filter(t: testing.EnvT):
+    """Test get-config operation with a subtree filter
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            # Create a subtree filter to get only specific configuration
+            # Example: filter for interfaces configuration
+            filter_node = xml.Node("filter", None, None, [("type", "subtree")], [
+                xml.Node("interfaces",
+                    [(None, "urn:ietf:params:xml:ns:yang:ietf-interfaces")],
+                    children=[
+                        xml.Node("interface", children=[
+                            xml.Node("name", text="eth0")
+                        ])
+                    ]
+                )
+            ])
+            c.get_config(_on_get_config_filtered, "running", filter_node)
+
+    def _on_get_config_filtered(c: Client, result: ?xml.Node):
+        if result is not None:
+            log.info("<get-config> with filter received response")
+            # Check if we got an rpc-reply
+            if result.tag == "rpc-reply":
+                # Check for data or error elements
+                has_data = False
+                has_error = False
+                for child in result.children:
+                    if child.tag == "data":
+                        has_data = True
+                    elif child.tag == "rpc-error":
+                        has_error = True
+
+                if has_data:
+                    log.info("Filtered config data received successfully")
+                    t.success()
+                elif has_error:
+                    # Extract error message if available
+                    error_msgs = []
+                    for child in result.children:
+                        if child.tag == "rpc-error":
+                            for error_child in child.children:
+                                if error_child.tag == "error-message":
+                                    _text = error_child.text
+                                    if _text is not None:
+                                        error_msgs.append(_text)
+                    if len(error_msgs) > 0:
+                        log.error("RPC error", {"messages": error_msgs})
+                    t.failure(ValueError("RPC error: " + ", ".join(error_msgs) if len(error_msgs) > 0 else "Unknown error"))
+                else:
+                    log.warning("No data element in response, but this might be normal if no matching config exists")
+                    t.success()  # Still success as empty result is valid for filter
+            else:
+                log.error("Unexpected response type", {"tag": result.tag})
+                t.failure(ValueError("Unexpected response type: {result.tag}"))
+        else:
+            log.error("<get-config> with filter received null response")
+            t.failure(ValueError("get-config with filter returned null"))
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                log_handler=t.log_handler)
+
+
+actor _test_get_config_with_xpath_filter(t: testing.EnvT):
+    """Test get-config operation with an XPath filter
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            # Create an XPath filter to select specific configuration elements
+            # Example: select all interface names
+            filter_node = xml.Node("filter", None, None,
+                [("type", "xpath"),
+                 ("select", "/interfaces/interface/name")],
+                []
+            )
+            c.get_config(_on_get_config_xpath_filtered, "running", filter_node)
+
+    def _on_get_config_xpath_filtered(c: Client, result: ?xml.Node):
+        if result is not None:
+            log.info("<get-config> with XPath filter received response")
+            # Check if we got an rpc-reply
+            if result.tag == "rpc-reply":
+                # Check for data or error elements
+                has_data = False
+                has_error = False
+                for child in result.children:
+                    if child.tag == "data":
+                        has_data = True
+                    elif child.tag == "rpc-error":
+                        has_error = True
+
+                if has_data:
+                    log.info("XPath filtered config data received successfully")
+                    t.success()
+                elif has_error:
+                    # Extract error messages - XPath might not be supported
+                    error_msgs = []
+                    for child in result.children:
+                        if child.tag == "rpc-error":
+                            for error_child in child.children:
+                                if error_child.tag == "error-message":
+                                    _text = error_child.text
+                                    if _text is not None:
+                                        error_msgs.append(_text)
+                    log.info("Server returned error (XPath might not be supported)", {"messages": error_msgs})
+                    t.failure(ValueError("Unexpected response type: {error_msgs}"))
+            else:
+                log.error("Unexpected response type", {"tag": result.tag})
+                t.failure(ValueError("Unexpected response type: {result.tag}"))
+        else:
+            log.error("<get-config> with XPath filter received null response")
+            t.failure(ValueError("get-config with XPath filter returned null"))
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
