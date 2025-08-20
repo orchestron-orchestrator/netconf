@@ -72,7 +72,13 @@ state_name = {
     STATE_DISCONNECTING: "disconnecting"
 }
 
-actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?str, key: ?str,
+actor Client(
+        auth: WorldCap,
+        address: str,
+        port: int,
+        username: str,
+        password: ?str,
+        key: ?str,
         on_connect: action(Client, ?Exception) -> None,
         on_notif: ?action(Client, xml.Node) -> None,
         log_handler: ?logging.Handler):
@@ -87,14 +93,21 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
     var session_id: ?str = None
     var capabilities: list[str] = []
 
-    # Tracks explicit namespace prefix usage in NETCONF messages.
-    # Client mirrors server's namespace declaration pattern: defaults to
-    # implicit namespace on root element, switches to explicit prefix on all
-    # elements, including attributes, when detected in server responses. This is
-    # not a strict requirement per RFC 6241, but it is expected by Junos running
-    # RFC-compliant mode [1] - in particular the device will *not* include
-    # message-id in the replies if the attribute is sent without an explicit
-    # namespace prefix.
+    # Tracks explicit namespace prefix used in NETCONF messages. To maximize
+    # compatibility, we track and mirror the same namespace prefix declaration
+    # pattern used by the server. The default is to not use any prefix and set
+    # the xmlns default namespace on the root element. If we a prefix used in a
+    # server response, we switch over to use an explicit prefix on all elements,
+    # including attributes.
+    #
+    # The NETCONF RFC 6241 allows for any valid XML encoding to be used, but
+    # real world experience has shown that some implementations are sensitive.
+    # By dynamically aligning on what we detect the remote end is doing, we
+    # maximize our chances of interoperability.
+    #
+    # For examples JUNOS with rfc-compliact mode [1] enabled will NOT include
+    # the message-id in rpc-reply if the message-id attribute in the rpc is sent
+    # without an explicit namespace prefix.
     #
     # We always use the "urn:ietf:params:xml:ns:netconf:base:1.0" namespace when
     # creating xml.Node for tags. The nsdefs tuple (nc_prefix, NS_NC_1_1)
@@ -267,10 +280,9 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
             cb(c, error)
 
-        nc_nsdefs = [(None, NS_NC_1_0)]
-        rpc(xml.Node("lock", nc_nsdefs, children=[
-            xml.Node("target", children=[
-                xml.Node(datastore)
+        rpc(xml.Node("lock", [], nc_prefix, children=[
+            xml.Node("target", [], nc_prefix, children=[
+                xml.Node(datastore, [], nc_prefix)
             ])
         ]), _parse_response)
 
@@ -300,10 +312,9 @@ actor Client(auth: WorldCap, address: str, port: int, username: str, password: ?
 
             cb(c, error)
 
-        nc_nsdefs = [(None, NS_NC_1_0)]
-        rpc(xml.Node("unlock", nc_nsdefs, children=[
-            xml.Node("target", children=[
-                xml.Node(datastore)
+        rpc(xml.Node("unlock", [], nc_prefix, children=[
+            xml.Node("target", [], nc_prefix, children=[
+                xml.Node(datastore, [], nc_prefix)
             ])
         ]), _parse_response)
 
@@ -880,8 +891,7 @@ actor _test_lock_unlock(t: testing.EnvT):
             t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
         else:
             log.info("Connected to NETCONF server")
-            # First lock the running datastore
-            c.lock(_on_lock, "running")
+            c.lock(_on_lock, "candidate")
 
     def _on_lock(c: Client, error: ?NetconfError):
         if error is not None:
@@ -890,7 +900,7 @@ actor _test_lock_unlock(t: testing.EnvT):
         else:
             log.info("Lock operation successful")
             # Now unlock the datastore
-            c.unlock(_on_unlock, "running")
+            c.unlock(_on_unlock, "candidate")
 
     def _on_unlock(c: Client, error: ?NetconfError):
         if error is not None:
