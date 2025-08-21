@@ -290,7 +290,16 @@ actor CmdGetSchema(env, args, log_handler):
                     else:
                         filename = "{filename}.yang"
 
-                    filepath = "{output_dir}/{filename}"
+                    if output_dir not in {"", "."}:
+                        fs = file.FS(file.FileCap(env.auth))
+                        try:
+                            await async fs.mkdir(output_dir)
+                        except OSError as err:
+                            if "already exists" not in err.error_message:
+                                raise err
+                        filepath = file.join_path([output_dir, filename])
+                    else:
+                        filepath = filename
 
                     # Write to file
                     f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), filepath)
