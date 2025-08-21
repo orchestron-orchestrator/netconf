@@ -30,7 +30,7 @@ actor CmdListSchemas(env, args):
         else:
             c.list_schemas(_on_list_schemas)
 
-    def _on_list_schemas(c: netconf.Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+    def _on_list_schemas(c: netconf.Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]):
         for schema in schemas:
             schemas_found.append(schema)
 
@@ -47,7 +47,8 @@ actor CmdListSchemas(env, args):
             version_str = str(schema.version) if schema.version is not None else "N/A"
             format_str = str(schema.format) if schema.format is not None else "N/A"
             identifier_str = str(schema.identifier) if schema.identifier is not None else "N/A"
-            print("  {identifier_str:<40} {version_str:<15} {format_str}")
+            namespace_str = str(schema.namespace) if schema.namespace is not None else "N/A"
+            print("  {identifier_str:<40} {version_str:<15} {format_str:<5} {namespace_str}")
             count += 1
 
         print("\nTotal schemas: {count}")
@@ -95,7 +96,7 @@ actor CmdGetSchema(env, args):
                 schemas_to_download.append((identifier=identifier_str, version=version, format=format))
                 _download_next_schema()
 
-    def _on_list_schemas_for_download(c: netconf.Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+    def _on_list_schemas_for_download(c: netconf.Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]):
         # Only download yang format (not yin) to avoid duplicates
         for schema in schemas:
             # Only add schemas with valid identifiers and yang format
