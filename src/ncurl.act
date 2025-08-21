@@ -13,6 +13,30 @@ import netconf
 import xml
 
 
+def _check_rpc_error(result: ?xml.Node) -> ?str:
+    """Check for RPC errors in a NETCONF response.
+
+    Returns None if no errors, or an error message string if errors found.
+    """
+    if result is not None:
+        if result.tag != "rpc-reply":
+            return "Invalid response: expected rpc-reply, got {result.tag}"
+
+        for child in result.children:
+            if child.tag == "rpc-error":
+                error_details = []
+                for error_child in child.children:
+                    if error_child.tag == "error-message" and error_child.text is not None:
+                        error_details.append("message: {error_child.text}")
+                    elif error_child.tag == "error-tag" and error_child.text is not None:
+                        error_details.append("tag: {error_child.text}")
+                    elif error_child.tag == "error-type" and error_child.text is not None:
+                        error_details.append("type: {error_child.text}")
+                return ', '.join(error_details) if len(error_details) > 0 else "Unknown error"
+    else:
+        return "No response received"
+
+
 actor CmdListSchemas(env, args, log_handler):
     """List available schemas from a NETCONF server"""
 
@@ -120,59 +144,47 @@ actor CmdGetConfig(env, args, log_handler):
         c.get_config(_on_get_config, source, filter_node)
 
     def _on_get_config(c: netconf.Client, result: ?xml.Node):
-        if result is not None:
-            if result.tag == "rpc-reply":
-                # Check for errors and extract data
-                has_error = False
-                config_data: ?xml.Node = None
-
-                for child in result.children:
-                    if child.tag == "rpc-error":
-                        has_error = True
-                        error_details = []
-                        for error_child in child.children:
-                            if error_child.tag == "error-message" and error_child.text is not None:
-                                error_details.append("message: {error_child.text}")
-                            elif error_child.tag == "error-tag" and error_child.text is not None:
-                                error_details.append("tag: {error_child.text}")
-                            elif error_child.tag == "error-type" and error_child.text is not None:
-                                error_details.append("type: {error_child.text}")
-                        print("Error getting config: {', '.join(error_details)}", err=True)
-                        env.exit(1)
-                    elif child.tag == "data":
-                        config_data = child
-
-                if not has_error:
-                    config_xml = ""
-                    if config_data is not None:
-                        # Extract just the configuration data content
-                        if len(config_data.children) > 0:
-                            # Encode children of data element
-                            for data_child in config_data.children:
-                                config_xml += data_child.encode()
-                        elif config_data.text is not None:
-                            # If data element has text content
-                            config_xml = str(config_data.text)
-                    else:
-                        print("No data element in response", err=True)
-                        env.exit(1)
-
-                    if output_file != "":
-                        # Write to file
-                        f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), output_file)
-                        f.write(config_xml.encode())
-                        f.close()
-                        print("Configuration saved to: {output_file}")
-                    else:
-                        # Print to stdout
-                        print(config_xml)
-
-                    def _close_cb():
-                        env.exit(0)
-                    c.close(_close_cb)
-        else:
-            print("Error: No response received", err=True)
+        # Check for errors
+        error_msg = _check_rpc_error(result)
+        if error_msg is not None:
+            print("Error getting config: {error_msg}", err=True)
             env.exit(1)
+
+        # Extract data element
+        config_data: ?xml.Node = None
+        if result is not None:
+            for child in result.children:
+                if child.tag == "data":
+                    config_data = child
+                    break
+
+        config_xml = ""
+        if config_data is not None:
+            # Extract just the configuration data content
+            if len(config_data.children) > 0:
+                # Encode children of data element
+                for data_child in config_data.children:
+                    config_xml += data_child.encode()
+            elif config_data.text is not None:
+                # If data element has text content
+                config_xml = str(config_data.text)
+        else:
+            print("No data element in response", err=True)
+            env.exit(1)
+
+        if output_file != "":
+            # Write to file
+            f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), output_file)
+            f.write(config_xml.encode())
+            f.close()
+            print("Configuration saved to: {output_file}")
+        else:
+            # Print to stdout
+            print(config_xml)
+
+        def _close_cb():
+            env.exit(0)
+        c.close(_close_cb)
 
     c = netconf.Client(env.auth,
                       on_connect=_on_connect,
@@ -254,52 +266,39 @@ actor CmdGetSchema(env, args, log_handler):
         if current_download_index < len(schemas_to_download):
             schema = schemas_to_download[current_download_index]
 
-            schema_data: ?str = None
-            if result is not None:
-                if result.tag == "rpc-reply":
-                    # Check for errors
-                    has_error = False
+            # Check for errors
+            error_msg = _check_rpc_error(result)
+            if error_msg is not None:
+                print("  Error downloading {schema.identifier}: {error_msg}", err=True)
+            else:
+                # Extract schema data
+                schema_data: ?str = None
+                if result is not None:
                     for child in result.children:
-                        if child.tag == "rpc-error":
-                            has_error = True
-                            error_details = []
-                            for error_child in child.children:
-                                if error_child.tag == "error-message" and error_child.text is not None:
-                                    error_details.append("message: {error_child.text}")
-                                elif error_child.tag == "error-tag" and error_child.text is not None:
-                                    error_details.append("tag: {error_child.text}")
-                                elif error_child.tag == "error-type" and error_child.text is not None:
-                                    error_details.append("type: {error_child.text}")
-                            print("  Error downloading {schema.identifier}: {', '.join(error_details)}", err=True)
+                        if child.tag == "data":
+                            schema_data = child.text
                             break
 
-                    if not has_error:
-                        # Extract schema data
-                        for child in result.children:
-                            if child.tag == "data":
-                                schema_data = child.text
-                                break
+                if schema_data is not None:
+                    # Build proper filename with identifier and version
+                    # We already ensure identifier is not None before getting here
+                    filename = "{schema.identifier}"
+                    if schema.version is not None:
+                        filename = "{schema.identifier}@{schema.version}"
+                    if schema.format is not None:
+                        filename = "{filename}.{schema.format}"
+                    else:
+                        filename = "{filename}.yang"
 
-            if schema_data is not None:
-                # Build proper filename with identifier and version
-                # We already ensure identifier is not None before getting here
-                filename = "{schema.identifier}"
-                if schema.version is not None:
-                    filename = "{schema.identifier}@{schema.version}"
-                if schema.format is not None:
-                    filename = "{filename}.{schema.format}"
+                    filepath = "{output_dir}/{filename}"
+
+                    # Write to file
+                    f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), filepath)
+                    f.write(schema_data.encode())
+                    f.close()
+                    print("  Saved to: {filepath}")
                 else:
-                    filename = "{filename}.yang"
-
-                filepath = "{output_dir}/{filename}"
-
-                # Write to file
-                f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), filepath)
-                f.write(schema_data.encode())
-                f.close()
-                print("  Saved to: {filepath}")
-            else:
-                print("  Warning: No data received for {schema.identifier}")
+                    print("  Warning: No data received for {schema.identifier}")
 
         # Move to next schema
         current_download_index += 1
