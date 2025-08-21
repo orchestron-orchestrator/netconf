@@ -65,6 +65,126 @@ actor CmdListSchemas(env, args, log_handler):
                       log_handler=log_handler)
 
 
+actor CmdGetConfig(env, args, log_handler):
+    """Get configuration from a NETCONF server"""
+
+    host = args.get_str("host")
+    port = args.get_int("port")
+    username = args.get_str("username")
+    password = args.get_str("password")
+    source = args.get_str("source")
+    filter_subtree = args.get_str("filter-subtree")
+    filter_xpath = args.get_str("filter-xpath")
+    xpath_namespaces = args.get_strlist("xpath-namespaces")
+    output_file = args.get_str("output")
+
+    def _on_connect(c: netconf.Client, e: ?Exception):
+        if e is not None:
+            print("Error: Failed to connect: {e}", err=True)
+            env.exit(1)
+
+        # Build filter if provided
+        filter_node: ?xml.Node = None
+
+        if filter_subtree != "" and filter_xpath != "":
+            print("Error: Cannot specify both filter-subtree and filter-xpath", err=True)
+            env.exit(1)
+
+        if filter_subtree != "":
+            # Wrap subtree filter in <filter> element
+            try:
+                subtree_node = xml.decode(filter_subtree)
+                filter_node = xml.Node("filter", attributes=[("type", "subtree")], children=[subtree_node], text=None)
+            except xml.XmlParseError as parse_error:
+                print("Error: Invalid subtree filter XML: {parse_error.error_message}", err=True)
+                env.exit(1)
+        elif filter_xpath != "":
+            # Create XPath filter with proper namespace
+            filter_attrs = [("type", "xpath"), ("select", filter_xpath)]
+
+            # Add namespace declarations if provided
+            # Each namespace should be in format "prefix=uri"
+            nsdefs = []
+            for ns_decl in xpath_namespaces:
+                parts = ns_decl.split("=")
+                if len(parts) == 2:
+                    prefix = parts[0].strip()
+                    uri = parts[1].strip()
+                    nsdefs.append((prefix, uri))
+                else:
+                    print("Error: Invalid namespace format '{ns_decl}'. Use prefix=uri", err=True)
+                    env.exit(1)
+
+            filter_node = xml.Node("filter", nsdefs, attributes=filter_attrs)
+
+        c.get_config(_on_get_config, source, filter_node)
+
+    def _on_get_config(c: netconf.Client, result: ?xml.Node):
+        if result is not None:
+            if result.tag == "rpc-reply":
+                # Check for errors and extract data
+                has_error = False
+                config_data: ?xml.Node = None
+
+                for child in result.children:
+                    if child.tag == "rpc-error":
+                        has_error = True
+                        error_details = []
+                        for error_child in child.children:
+                            if error_child.tag == "error-message" and error_child.text is not None:
+                                error_details.append("message: {error_child.text}")
+                            elif error_child.tag == "error-tag" and error_child.text is not None:
+                                error_details.append("tag: {error_child.text}")
+                            elif error_child.tag == "error-type" and error_child.text is not None:
+                                error_details.append("type: {error_child.text}")
+                        print("Error getting config: {', '.join(error_details)}", err=True)
+                        env.exit(1)
+                    elif child.tag == "data":
+                        config_data = child
+
+                if not has_error:
+                    config_xml = ""
+                    if config_data is not None:
+                        # Extract just the configuration data content
+                        if len(config_data.children) > 0:
+                            # Encode children of data element
+                            for data_child in config_data.children:
+                                config_xml += data_child.encode()
+                        elif config_data.text is not None:
+                            # If data element has text content
+                            config_xml = str(config_data.text)
+                    else:
+                        print("No data element in response", err=True)
+                        env.exit(1)
+
+                    if output_file != "":
+                        # Write to file
+                        f = file.WriteFile(file.WriteFileCap(file.FileCap(env.auth)), output_file)
+                        f.write(config_xml.encode())
+                        f.close()
+                        print("Configuration saved to: {output_file}")
+                    else:
+                        # Print to stdout
+                        print(config_xml)
+
+                    def _close_cb():
+                        env.exit(0)
+                    c.close(_close_cb)
+        else:
+            print("Error: No response received", err=True)
+            env.exit(1)
+
+    c = netconf.Client(env.auth,
+                      on_connect=_on_connect,
+                      on_notif=None,
+                      address=host,
+                      username=username,
+                      key=None,
+                      password=password,
+                      port=port,
+                      log_handler=log_handler)
+
+
 actor CmdGetSchema(env, args, log_handler):
     """Download schema(s) from a NETCONF server"""
 
@@ -216,6 +336,13 @@ actor main(env):
             logh.add_sink(logging.ConsoleSink())
         CmdListSchemas(env, args, logh)
 
+    def cmd_get_config(args):
+        """Command handler for get-config"""
+        if args.get_bool("verbose"):
+            logh.set_output_level(logging.TRACE)
+            logh.add_sink(logging.ConsoleSink())
+        CmdGetConfig(env, args, logh)
+
     def cmd_get_schema(args):
         """Command handler for get-schema"""
         if args.get_bool("verbose"):
@@ -235,6 +362,13 @@ actor main(env):
 
         # Commands
         p_list_schemas = p.add_cmd("list-schemas", "List available schemas", cmd_list_schemas)
+
+        p_get_config = p.add_cmd("get-config", "Get configuration from NETCONF server", cmd_get_config)
+        p_get_config.add_option("source", "str", "?", "running", "Configuration datastore (running, startup, candidate)")
+        p_get_config.add_option("filter-subtree", "str", "?", "", "XML subtree filter")
+        p_get_config.add_option("filter-xpath", "str", "?", "", "XPath expression for filtering")
+        p_get_config.add_option("xpath-namespaces", "strlist", "*", [], "Namespace declarations for XPath filtering (format: prefix=uri)")
+        p_get_config.add_option("output", "str", "?", "", "Output file (if not specified, prints to stdout)")
 
         p_get_schema = p.add_cmd("get-schema", "Download schema(s) from NETCONF server", cmd_get_schema)
         p_get_schema.add_arg("identifier", "Schema identifier or 'all' to download all schemas", True, "?")
