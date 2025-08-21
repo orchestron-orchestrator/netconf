@@ -328,7 +328,7 @@ actor Client(
         children.append(xml.Node("format", text=format))
         rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
 
-    def list_schemas(cb: action(Client, list[(identifier: ?str, version: ?str, format: ?str)]) -> None) -> None:
+    def list_schemas(cb: action(Client, list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]) -> None) -> None:
         """List available schemas and return parsed list of (identifier, version, format) tuples"""
         _log.info("NETCONF list-schemas")
 
@@ -341,7 +341,7 @@ actor Client(
                             schemas = _parse_schemas_data(child)
             cb(c, schemas)
 
-        def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str)]:
+        def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str, ?str)]:
             schemas = []
             for netconf_state in data_node.children:
                 if netconf_state.tag == "netconf-state":
@@ -350,18 +350,21 @@ actor Client(
                             for schema in schemas_node.children:
                                 if schema.tag == "schema":
                                     identifier = None
+                                    namespace = None
                                     version = None
                                     format = None
                                     for attr in schema.children:
                                         attr_text = attr.text
                                         if attr.tag == "identifier" and attr_text is not None:
                                             identifier = attr_text
+                                        elif attr.tag == "namespace" and attr_text is not None:
+                                            namespace = attr_text
                                         elif attr.tag == "version" and attr_text is not None:
                                             version = attr_text
                                         elif attr.tag == "format" and attr_text is not None:
                                             format = attr_text
                                     if identifier is not None:
-                                        schemas.append((identifier, version, format))
+                                        schemas.append((identifier, namespace, version, format))
             return schemas
 
         # Create filter for /netconf-state/schemas from ietf-netconf-monitoring
@@ -859,10 +862,10 @@ actor _test_list_schemas(t: testing.EnvT):
             log.info("Connected to NETCONF server")
             c.list_schemas(_on_list_schemas)
 
-    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, version: ?str, format: ?str)]):
+    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]):
         log.info("Received schemas list", {"count": len(schemas)})
         for schema in schemas:
-            log.info("Schema found", {"identifier": schema.identifier, "version": schema.version, "format": schema.format})
+            log.info("Schema found", {"identifier": schema.identifier, "namespace": schema.namespace, "version": schema.version, "format": schema.format})
         if len(schemas) > 0:
             t.success()
         else:
