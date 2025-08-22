@@ -44,6 +44,7 @@ actor CmdListSchemas(env, args, log_handler):
     port = args.get_int("port")
     username = args.get_str("username")
     password = args.get_str("password")
+    skip_host_key_check = not args.get_bool("secure")
 
     var schemas_found = []
 
@@ -86,6 +87,7 @@ actor CmdListSchemas(env, args, log_handler):
                       key=None,
                       password=password,
                       port=port,
+                      skip_host_key_check=skip_host_key_check,
                       log_handler=log_handler)
 
 
@@ -96,6 +98,7 @@ actor CmdGetConfig(env, args, log_handler):
     port = args.get_int("port")
     username = args.get_str("username")
     password = args.get_str("password")
+    skip_host_key_check = not args.get_bool("secure")
     source = args.get_str("source")
     filter_subtree = args.get_str("filter-subtree")
     filter_xpath = args.get_str("filter-xpath")
@@ -194,6 +197,7 @@ actor CmdGetConfig(env, args, log_handler):
                       key=None,
                       password=password,
                       port=port,
+                      skip_host_key_check=skip_host_key_check,
                       log_handler=log_handler)
 
 
@@ -204,6 +208,7 @@ actor CmdGetSchema(env, args, log_handler):
     port = args.get_int("port")
     username = args.get_str("username")
     password = args.get_str("password")
+    skip_host_key_check = not args.get_bool("secure")
     identifier_str = args.get_str("identifier")
     version_str = args.get_str("version")
     version = version_str if version_str != "" else None
@@ -331,6 +336,7 @@ actor CmdGetSchema(env, args, log_handler):
                   key=None,
                   password=password,
                   port=port,
+                  skip_host_key_check=skip_host_key_check,
                   log_handler=log_handler)
 
 
@@ -367,6 +373,7 @@ actor main(env):
         p.add_option("username", "str", "?", "admin", "Username for authentication")
         p.add_option("password", "str", "?", "admin", "Password for authentication")
         p.add_bool("verbose", "Verbose logging from SSH / NETCONF client")
+        p.add_bool("secure", "Enable SSH host key verification")
 
         # Commands
         p_list_schemas = p.add_cmd("list-schemas", "List available schemas", cmd_list_schemas)
