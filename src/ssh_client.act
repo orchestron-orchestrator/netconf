@@ -45,6 +45,7 @@ actor Client(auth: WorldCap,
              password: ?str,
              port: int=22,
              subsystem: ?str=None,
+             skip_host_key_check: bool=False,
              log_handler: ?logging.Handler=None):
     _log = logging.Logger(log_handler)
     _log.info("Connecting", {"address": address, "username": username, "port": port})
@@ -151,8 +152,10 @@ actor Client(auth: WorldCap,
         cmd_env = None
         # Use -v for verbose output, we need this to determine e.g. connection established
         cmd = ["ssh", "-v", "-p", str(port), "-l", username]
-        # TODO: do something better than accepting all new host keys!
-        cmd += ["-o", "StrictHostKeyChecking=no"]  # Disable strict host key checking
+        if skip_host_key_check:
+            # Skip host key checking for testing environments
+            cmd += ["-o", "StrictHostKeyChecking=no"]  # Disable strict host key checking
+            cmd += ["-o", "UserKnownHostsFile=/dev/null"]  # Don't use known_hosts file
         if key is not None:
             cmd += ["-i", key]
         elif password is not None:
@@ -211,6 +214,7 @@ actor _test_bad_credentials(t: testing.EnvT):
                 key=None,
                 password="dummy",
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 actor _test_netconf(t: testing.EnvT):
@@ -238,6 +242,7 @@ actor _test_netconf(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 actor _test_restart(t: testing.EnvT):
@@ -267,6 +272,7 @@ actor _test_restart(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -302,4 +308,5 @@ actor client(env: Env):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=log_handler)

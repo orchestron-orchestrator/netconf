@@ -81,6 +81,7 @@ actor Client(
         key: ?str,
         on_connect: action(Client, ?Exception) -> None,
         on_notif: ?action(Client, xml.Node) -> None,
+        skip_host_key_check: bool=False,
         log_handler: ?logging.Handler):
 
     _log = logging.Logger(log_handler)
@@ -561,6 +562,7 @@ actor Client(
                               password=password,
                               port=port,
                               subsystem="netconf",
+                              skip_host_key_check=skip_host_key_check,
                               log_handler=log_handler)
 
     _connect()
@@ -811,6 +813,8 @@ actor _test_netconf(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                on_notif=None,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -846,6 +850,7 @@ actor _test_get_schema(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -880,6 +885,7 @@ actor _test_list_schemas(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -922,6 +928,7 @@ actor _test_lock_unlock(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -998,6 +1005,7 @@ actor _test_get_config_with_filter(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
@@ -1065,6 +1073,7 @@ actor _test_get_config_with_xpath_filter(t: testing.EnvT):
                 key=None,
                 password=test_password,
                 port=test_port,
+                skip_host_key_check=True,
                 log_handler=t.log_handler)
 
 
