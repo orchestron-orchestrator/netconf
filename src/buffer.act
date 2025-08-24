@@ -7,16 +7,15 @@ class IncompleteReadError(Exception):
         self.msg = "Not enough data to read from buffer"
 
 class Buffer(object):
-    @property
     parts: list[bytes]
-    @property
     i: int
-    @property
     j: int
-    @property
     total_bytes: int
-    @property
     unread_bytes: int
+    _cached_pattern: ?bytes
+    _cached_search_i: int
+    _cached_search_j: int
+    _cached_search_index: int
 
     def __init__(self):
         self.parts = []
@@ -24,6 +23,10 @@ class Buffer(object):
         self.j = 0
         self.total_bytes = 0
         self.unread_bytes = 0
+        self._cached_pattern = None
+        self._cached_search_i = 0
+        self._cached_search_j = 0
+        self._cached_search_index = 0
 
     def write_bytes(self, data: bytes):
         l = len(data)
@@ -47,6 +50,8 @@ class Buffer(object):
                 parts[0] = parts[0][self.j:]
             self.j = 0
         self.total_bytes = self.unread_bytes
+        # Invalidate cache after consume
+        self._cached_pattern = None
         #print("CONSUMED!", self.parts)
 
     def rewind(self):
@@ -54,6 +59,8 @@ class Buffer(object):
         self.i = 0
         self.j = 0
         self.unread_bytes = self.total_bytes
+        # Invalidate cache after rewind
+        self._cached_pattern = None
 
     def read_bytes_count(self) -> int:
         return self.total_bytes - self.unread_bytes
@@ -91,6 +98,8 @@ class Buffer(object):
             acc.append(chunk)
         self.unread_bytes -= count
         #print("READ1!", self.i, self.j)
+        # Invalidate cache after read since buffer position has changed
+        self._cached_pattern = None
         return bytes([]).join(acc)
 
     def read_all_bytes(self) -> bytes:
@@ -120,6 +129,8 @@ class Buffer(object):
             self.j = 0
         self.unread_bytes -= count
         #print("SKIP0!", self.i, self.j)
+        # Invalidate cache after skip since buffer position has changed
+        self._cached_pattern = None
         return True
 
     def find_bytes(self, pattern: bytes) -> value: # (index: int | err: IncompleteReadError)
@@ -129,51 +140,61 @@ class Buffer(object):
         elif pattern_len > self.unread_bytes:
             return IncompleteReadError()
 
-        index = 0   # tracks the possible start of pattern
-        _i = self.i # current part (index of self.parts)
-        _j = self.j # current position in current part
-
         # Check if we have any parts to search
-        if len(self.parts) == 0 or _i >= len(self.parts):
+        if len(self.parts) == 0:
             return IncompleteReadError()
 
-        part = self.parts[_i]
-        part_len = len(part)
+        if self._cached_pattern == pattern:
+            index = self._cached_search_index
+            _i = self._cached_search_i
+            _j = self._cached_search_j
+        else:
+            index = 0   # tracks absolute position in buffer
+            _i = self.i # current part (index of self.parts)
+            _j = self.j # current position in current part
+            self._cached_pattern = pattern
+
         while index <= self.unread_bytes - pattern_len:
-            pattern_index = 0
-            scan_i = _i
-            scan_j = _j
-            scan_part = part
-            scan_part_len = part_len
-            # Starting from index, scan the next pattern_len bytes for a pattern match
-            while pattern_index < pattern_len:
-                b = scan_part[scan_j]
-                if b != pattern[pattern_index]:
-                    break
-                pattern_index += 1
-                scan_j += 1
-                if scan_j >= scan_part_len:
-                    scan_i += 1
-                    scan_j = 0
-                    if scan_i >= len(self.parts):
-                        # We've run out of parts while scanning
+            pos = self.parts[_i].find(chr(pattern[0]).encode(), _j)
+
+            if pos >= 0:
+                # Found first byte, update index to this position
+                index += pos - _j
+
+                # Scan the rest of the pattern byte-by-byte because the pattern
+                # may be split across parts
+                scan_i = _i
+                scan_j = pos + 1
+                for pattern_index in range(1, pattern_len):
+                    if scan_j >= len(self.parts[scan_i]):
+                        # Advance to next part
+                        scan_j = 0
+                        scan_i += 1
+                        if scan_i >= len(self.parts):
+                            # Exhausted all parts
+                            break
+                    if self.parts[scan_i][scan_j] != pattern[pattern_index]:
                         break
-                    scan_part = self.parts[scan_i]
-                    scan_part_len = len(scan_part)
+                    scan_j += 1
+                else:
+                    return index
 
-            if pattern_index == pattern_len:
-                # We matched all bytes in the pattern
-                return index
-
-            index += 1
-            _j += 1
-            if _j >= part_len:
+                # No match, advance position by 1 and continue
+                _j = pos + 1
+                index += 1
+            else:
+                # First byte not found in rest of this part
+                index += len(self.parts[_i]) - _j
                 _i += 1
                 _j = 0
                 if _i >= len(self.parts):
-                    return IncompleteReadError()
-                part = self.parts[_i]
-                part_len = len(part)
+                    # Exhausted all parts
+                    break
+
+        # Cache current position for next search
+        self._cached_search_i = _i
+        self._cached_search_j = _j
+        self._cached_search_index = index
 
         return IncompleteReadError()
 
@@ -374,3 +395,34 @@ def _test_buffer_find_bytes_after_consume():
             testing.assertTrue(isinstance(pos2, int), "Should return int for found pattern")
             if isinstance(pos2, int):
                 testing.assertEqual(pos2, 6, "Should find second separator at position 6 after consume")
+
+
+def _test_buffer_find_bytes_performance():
+    """Test performance of finding pattern at end of large buffer with 64k chunks"""
+
+    buf = Buffer()
+    pattern = "]]>]]>".encode()
+    chunk_size = 64 * 1024  # 64KB chunks
+    total_size = 2 * 1024 * 1024  # 2MB total
+
+    # Create a chunk of data that doesn't contain the pattern
+    chunk_data = ("x" * chunk_size).encode()
+
+    # Write chunks to buffer (2MB total) and search after each chunk
+    num_chunks = total_size // chunk_size
+    for i in range(num_chunks):
+        buf.write_bytes(chunk_data)
+        # Search for pattern after each chunk (should not be found)
+        result = buf.find_bytes(pattern)
+        testing.assertTrue(isinstance(result, IncompleteReadError), f"Should not find pattern after chunk {i+1}")
+
+    # Add pattern at the very end
+    buf.write_str("]]>]]>")
+
+    # Now search for pattern (should be found at end)
+    result = buf.find_bytes(pattern)
+
+    # Verify pattern was found at correct position
+    testing.assertTrue(isinstance(result, int), "Should return int for found pattern")
+    if isinstance(result, int):
+        testing.assertEqual(result, total_size, "Should find pattern at position 2MB")
