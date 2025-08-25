@@ -153,9 +153,15 @@ actor Client(auth: WorldCap,
         # Use -v for verbose output, we need this to determine e.g. connection established
         cmd = ["ssh", "-v", "-p", str(port), "-l", username]
         if skip_host_key_check:
-            # Skip host key checking for testing environments
-            cmd += ["-o", "StrictHostKeyChecking=no"]  # Disable strict host key checking
+            # StrictHostKeyChecking=no only disables the prompt for new hosts,
+            # but SSH will still fail if there's an existing entry with a
+            # mismatched key in known_hosts.  To truly skip all host key checks,
+            # we need to use /dev/null for known_hosts.
+            cmd += ["-o", "StrictHostKeyChecking=no"]
             cmd += ["-o", "UserKnownHostsFile=/dev/null"]  # Don't use known_hosts file
+        else:
+            # Updates ~/.ssh/known_hosts if no entry, otherwise checks match
+            cmd += ["-o", "StrictHostKeyChecking=accept-new"]
         if key is not None:
             cmd += ["-i", key]
         elif password is not None:
