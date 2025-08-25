@@ -52,6 +52,7 @@ actor Client(auth: WorldCap,
 
     var p: ?process.Process = None
     var state = STATE_NONE
+    _stderr_buffer: list[bytes] = []
 
     var close_cb: ?action() -> None = None
 
@@ -104,6 +105,7 @@ actor Client(auth: WorldCap,
         if data is not None:
             for line in data.splitlines():
                 line = line.strip()
+                _stderr_buffer.append(line)
                 _log.debug("SSH STDERR: {line}")
                 if line == b"debug1: Connection established.":
                     state = STATE_CONNECTED
@@ -125,6 +127,13 @@ actor Client(auth: WorldCap,
             7: "IP public key changed. sshpass exits without confirming the new key."
         }
         err_reason = exit_code_to_err_reason.get_def(exit_code, "Unknown error")
+
+        # Check for host key verification errors when exit code is 255
+        if exit_code == 255 and len(_stderr_buffer) > 0:
+            host_key_error = _detect_host_key_error()
+            if host_key_error is not None:
+                err_reason = host_key_error
+
         if state == STATE_DISCONNECTING:
             _log.debug("SSH client process exited while disconnecting", {"exit_code": exit_code, "term_signal": term_signal, "err_reason": err_reason})
             if close_cb is not None:
@@ -143,8 +152,60 @@ actor Client(auth: WorldCap,
         on_connect(self, OSError(error))
         p = None
 
+    def _detect_host_key_error():
+        host_changed = False
+        verification_failed = False
+        fingerprint = None
+        offending_key = None
+        host_info = None
+
+        for line in _stderr_buffer:
+            if line.find(b"REMOTE HOST IDENTIFICATION HAS CHANGED") >= 0:
+                # Key change is shown in all caps in a banner
+                host_changed = True
+            elif line.find(b"Host key verification failed") >= 0:
+                verification_failed = True
+            elif line.find(b"Offending") >= 0 and line.find(b"key in") >= 0:
+                # Extract file location from lines like "Offending ECDSA key in /home/bob/.ssh/known_hosts:519"
+                parts = line.decode().split("key in")
+                if len(parts) > 1:
+                    offending_key = parts[1].strip()
+            elif line.find(b"SHA256:") >= 0:
+                # Extract fingerprint
+                idx = line.find(b"SHA256:")
+                if idx != -1:
+                    fingerprint = line[idx:].decode().strip().rstrip('.')
+            elif line.find(b"Host key for") >= 0 and line.find(b"has changed") >= 0:
+                # Extract host info
+                parts = line.decode().split("Host key for")
+                if len(parts) > 1:
+                    host_part = parts[1].split("has changed")[0].strip()
+                    host_info = host_part
+
+        if host_changed or verification_failed:
+            msg_parts = []
+            if host_changed:
+                msg_parts.append("Host key verification failed: Remote host identification has changed!")
+            else:
+                msg_parts.append("Host key verification failed")
+
+            if host_info is not None:
+                msg_parts[0] += " for {host_info}"
+
+            if offending_key is not None:
+                msg_parts.append("Offending key in {offending_key}")
+
+            if fingerprint is not None:
+                msg_parts.append("New fingerprint: {fingerprint}")
+
+            return "\n".join(msg_parts)
+
+        return None
+
     def _connect():
         _log.debug("Connecting SSH client", {"address": address, "username": username, "port": port, "key": key, "password": password})
+        # Clear stderr buffer for new connection
+        _stderr_buffer.clear()
         if p is not None:
             _log.debug("SSH client process already created, stopping existing process")
             p.stop()
