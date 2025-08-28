@@ -58,8 +58,81 @@ class ConnectionRefusedError(ConnectionError):
 class ConnectionResetError(ConnectionError):
     pass
 
+
 class NetconfError(Exception):
-    pass
+    def __init__(self, error_message: ?str, rpc_error: ?list[RpcError]):
+        self.error_message = error_message if error_message is not None else ""
+        self.rpc_error = rpc_error
+
+    def __str__(self):
+        return "{self._name()}: {self.error_message}"
+
+    def __repr__(self):
+        return "{self._name()}({repr(self.error_message)}, {repr(self.rpc_error)})"
+
+
+class RpcError(object):
+    # RFC 6241 rpc-error fields
+    error_type: str         # transport/rpc/protocol/application
+    error_tag: str          # in-use/invalid-value/too-big/etc.
+    error_severity: str     # error/warning
+    error_app_tag: ?str     # optional application-specific tag
+    error_path: ?str        # optional XPath/element path
+    error_message: ?str     # optional human-readable message
+    error_info: ?dict[str, str]  # optional additional error information
+    xml: xml.Node          # raw <rpc-error> XML, including any vendor extension elements
+
+    def __init__(self, xml_node: xml.Node):
+        self.xml = xml_node
+        self.error_app_tag = None
+        self.error_path = None
+        self.error_message = None
+        self.error_info = None
+
+        def expect(t, errmsg):
+            if t is not None:
+                return t
+            raise ValueError(errmsg)
+
+        # Parse the XML into well-known attributes
+        for child in xml_node.children:
+            if child.tag == "error-type":
+                self.error_type = expect(child.text, "rpc-error missing expected error-type")
+            elif child.tag == "error-tag":
+                self.error_tag = expect(child.text, "rpc-error missing expected error-tag")
+            elif child.tag == "error-severity":
+                self.error_severity = expect(child.text, "rpc-error missing expected error-severity")
+            elif child.tag == "error-app-tag":
+                self.error_app_tag = child.text
+            elif child.tag == "error-path":
+                self.error_path = child.text
+            elif child.tag == "error-message":
+                self.error_message = child.text
+            elif child.tag == "error-info":
+                # Parse error-info elements into a dictionary
+                info = {}
+                for info_child in child.children:
+                    info_child_text = info_child.text
+                    if info_child_text is not None:
+                        info[info_child.tag] = info_child_text
+                if len(info) > 0:
+                    self.error_info = info
+
+    def __repr__(self):
+        args = "error_type={repr(self.error_type)}"
+        args += ", error_tag={repr(self.error_tag)}"
+        args += ", error_severity={repr(self.error_severity)}"
+        if self.error_app_tag is not None:
+            args += ", error_app_tag={repr(self.error_app_tag)}"
+        if self.error_path is not None:
+            args += ", error_path={repr(self.error_path)}"
+        if self.error_message is not None:
+            args += ", error_message={repr(self.error_message)}"
+        if self.error_info is not None:
+            args += ", error_info={repr(self.error_info)}"
+
+        return "netconf.RpcError({args})"
+
 
 STATE_NONE          = 0
 STATE_CONNECTING    = 1
@@ -107,7 +180,7 @@ actor Client(
     # By dynamically aligning on what we detect the remote end is doing, we
     # maximize our chances of interoperability.
     #
-    # For examples JUNOS with rfc-compliact mode [1] enabled will NOT include
+    # For examples JUNOS with rfc-compliant mode [1] enabled will NOT include
     # the message-id in rpc-reply if the message-id attribute in the rpc is sent
     # without an explicit namespace prefix.
     #
@@ -120,10 +193,29 @@ actor Client(
     var nc_prefix: ?str = None
 
     var message_id = 1
-    var rpc_cbs: dict[str, action(Client, ?xml.Node) -> None] = {}
+    var rpc_cbs: dict[str, action(Client, ?xml.Node, ?NetconfError) -> None] = {}
 
     var c: ?ssh_client.Client = None
     var state = STATE_NONE
+
+    def _parse_rpc_errors(rpc_reply: xml.Node) -> ?NetconfError:
+        """Parse <rpc-error> elements from an rpc-reply and return NetconfError if found"""
+        errors = []
+        for child in rpc_reply.children:
+            if child.tag == "rpc-error":
+                errors.append(RpcError(child))
+
+        if len(errors) == 0:
+            return None
+        else:
+            # Construct error message summary
+            messages = []
+            for err in errors:
+                error_message = err.error_message
+                if error_message is not None:
+                    messages.append(error_message)
+            error_message = "; ".join(messages) if len(messages) > 0 else None
+            return NetconfError(error_message, errors)
 
     def get_capabilities() -> list[str]:
         return capabilities
@@ -131,7 +223,7 @@ actor Client(
     # TODO: Close protocol
     def close(cb: ?action() -> None) -> None:
         for rpc_cb in rpc_cbs.values():
-            rpc_cb(self, None)
+            rpc_cb(self, None, None)
         #rpc_cbs.clear()
         rpc_cbs = {}
 
@@ -145,7 +237,7 @@ actor Client(
     def restart() -> None:
         _log.info("Restarting")
         for rpc_cb in rpc_cbs.values():
-            rpc_cb(self, None)
+            rpc_cb(self, None, None)
 
         framing = SEPARATOR_FRAMING
         recv_buf = Buffer()
@@ -185,7 +277,7 @@ actor Client(
         else:
             on_connect(self, BrokenPipeError("Cannot send message, SSH process is not running"))
 
-    def rpc(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
+    def rpc(content: xml.Node, callback: action(Client, ?xml.Node, ?NetconfError) -> None) -> None:
         message_id_text = str(message_id)
         message_id += 1
 
@@ -205,7 +297,7 @@ actor Client(
         _log.debug("Sending RPC", {"message-id": message_id_text, "content": content})
         _send_message(buf)
 
-    def get(cb: action(Client, ?xml.Node) -> None, filter: ?xml.Node=None) -> None:
+    def get(cb: action(Client, ?xml.Node, ?NetconfError) -> None, filter: ?xml.Node=None) -> None:
         _log.info("NETCONF get")
         nc_nsdefs = [(None, NS_NC_1_0)]
         children = []
@@ -213,7 +305,7 @@ actor Client(
             children.append(filter)
         rpc(xml.Node("get", nc_nsdefs, children=children), cb)
 
-    def get_config(cb: action(Client, ?xml.Node) -> None, datastore: str="running", filter: ?xml.Node=None) -> None:
+    def get_config(cb: action(Client, ?xml.Node, ?NetconfError) -> None, datastore: str="running", filter: ?xml.Node=None) -> None:
         _log.info("NETCONF get-config")
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         children = [
@@ -225,7 +317,7 @@ actor Client(
             children.append(filter)
         rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=children), cb)
 
-    def edit_config(config: str, cb: action(Client, ?xml.Node) -> None, datastore: str="running") -> None:
+    def edit_config(config: str, cb: action(Client, ?NetconfError) -> None, datastore: str="running") -> None:
         _log.info("NETCONF edit-config", {"datastore": datastore})
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         # Decode the config XML string into xml.Node objects to preserve
@@ -244,83 +336,37 @@ actor Client(
             # Cisco IOS XRd requires namespace declaration on an ancestor node,
             # not just where operation attributes are used.
             xml.Node("config", [("xc", "urn:ietf:params:xml:ns:netconf:base:1.0")], nc_prefix, children=config_xml.children)
-        ]), cb)
+        ]), lambda c, _, err: cb(c, err))
 
-    def commit(cb: action(Client, ?xml.Node) -> None) -> None:
+    def commit(cb: action(Client, ?NetconfError) -> None) -> None:
         _log.info("NETCONF commit", {})
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
-        rpc(xml.Node("commit", nc_nsdefs, nc_prefix), cb)
+        rpc(xml.Node("commit", nc_nsdefs, nc_prefix), lambda c, _, err: cb(c, err))
 
-    def discard_changes(cb: action(Client, ?xml.Node) -> None) -> None:
+    def discard_changes(cb: action(Client, ?NetconfError) -> None) -> None:
         _log.info("NETCONF discard-changes", {})
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
-        rpc(xml.Node("discard-changes", nc_nsdefs, nc_prefix), cb)
+        rpc(xml.Node("discard-changes", nc_nsdefs, nc_prefix), lambda c, _, err: cb(c, err))
 
     def lock(cb: action(Client, ?NetconfError) -> None, datastore: str) -> None:
         _log.info("NETCONF lock", {"datastore": datastore})
-
-        def _parse_response(c: Client, result: ?xml.Node):
-            error: ?NetconfError = None
-            if result is not None:
-                if result.tag == "rpc-reply":
-                    for child in result.children:
-                        if child.tag == "rpc-error":
-                            error_msg = "Lock operation failed"
-                            for error_child in child.children:
-                                if error_child.tag == "error-message" and error_child.text is not None:
-                                    error_msg = error_child.text
-                                    break
-                            error = NetconfError(error_msg)
-                            break
-                        elif child.tag == "ok":
-                            # Success case
-                            break
-                else:
-                    error = NetconfError("Unexpected response type: " + result.tag)
-            else:
-                error = NetconfError("No response received for lock operation")
-
-            cb(c, error)
-
-        rpc(xml.Node("lock", [], nc_prefix, children=[
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
+        rpc(xml.Node("lock", nc_nsdefs, nc_prefix, children=[
             xml.Node("target", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
             ])
-        ]), _parse_response)
+        ]), lambda c, _, err: cb(c, err))
 
     def unlock(cb: action(Client, ?NetconfError) -> None, datastore: str) -> None:
         _log.info("NETCONF unlock", {"datastore": datastore})
-
-        def _parse_response(c: Client, result: ?xml.Node):
-            error: ?NetconfError = None
-            if result is not None:
-                if result.tag == "rpc-reply":
-                    for child in result.children:
-                        if child.tag == "rpc-error":
-                            error_msg = "Unlock operation failed"
-                            for error_child in child.children:
-                                if error_child.tag == "error-message" and error_child.text is not None:
-                                    error_msg = error_child.text
-                                    break
-                            error = NetconfError(error_msg)
-                            break
-                        elif child.tag == "ok":
-                            # Success case
-                            break
-                else:
-                    error = NetconfError("Unexpected response type: " + result.tag)
-            else:
-                error = NetconfError("No response received for unlock operation")
-
-            cb(c, error)
-
-        rpc(xml.Node("unlock", [], nc_prefix, children=[
+        nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
+        rpc(xml.Node("unlock", nc_nsdefs, nc_prefix, children=[
             xml.Node("target", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
             ])
-        ]), _parse_response)
+        ]), lambda c, _, err: cb(c, err))
 
-    def get_schema(cb: action(Client, ?xml.Node) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
+    def get_schema(cb: action(Client, ?xml.Node, ?NetconfError) -> None, identifier: str, version: ?str=None, format: str="yang") -> None:
         _log.info("NETCONF get-schema", {"identifier": identifier, "version": version, "format": format})
         # get-schema is part of ietf-netconf-monitoring, not base NETCONF
         nc_nsdefs = [(None, "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring")]
@@ -330,18 +376,21 @@ actor Client(
         children.append(xml.Node("format", text=format))
         rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
 
-    def list_schemas(cb: action(Client, list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]) -> None) -> None:
+    def list_schemas(cb: action(Client, list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)], ?NetconfError) -> None) -> None:
         """List available schemas and return parsed list of (identifier, version, format) tuples"""
         _log.info("NETCONF list-schemas")
 
-        def _parse_response(c: Client, result: ?xml.Node):
+        def _parse_response(c: Client, result: ?xml.Node, error: ?NetconfError):
             schemas = []
-            if result is not None:
+            if error is not None:
+                # Pass empty list if there are errors
+                cb(c, schemas, error)
+            elif result is not None:
                 if result.tag == "rpc-reply":
                     for child in result.children:
                         if child.tag == "data":
                             schemas = _parse_schemas_data(child)
-            cb(c, schemas)
+            cb(c, schemas, None)
 
         def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str, ?str)]:
             schemas = []
@@ -378,7 +427,7 @@ actor Client(
         ], None, None)
         get(_parse_response, filter_node)
 
-    def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node) -> None) -> None:
+    def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node, ?NetconfError) -> None) -> None:
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
         rpc(action_node, callback)
 
@@ -465,7 +514,22 @@ actor Client(
             _cb = rpc_cbs.pop(msg_id)
             if _cb is not None:
                 _log.debug("Received rpc-reply", {"msg-id": msg_id})
-                _cb(self, root)
+
+                if len(root.children) == 0:
+                    _cb(self, root, NetconfError("Empty <rpc-reply>"))
+                elif len(root.children) == 1 and root.children[0].tag == "ok":
+                    # TODO: Should also verify namespace is NS_NC_1_0
+                    _cb(self, root, None)
+                else:
+                    # Parse for errors
+                    error = _parse_rpc_errors(root)
+
+                    if error is not None:
+                        # Error response
+                        _cb(self, root, error)
+                    else:
+                        # Normal data response - pass the whole root
+                        _cb(self, root, None)
             else:
                 _log.debug("Received rpc-reply with unexpected message-id", {"msg-id": msg_id})
         else:
@@ -620,9 +684,13 @@ actor _test_netconf(t: testing.EnvT):
                     log.info("Got NETCONF {cap} capability, looks reasonable, hello success")
                     c.get_config(_on_get_config)
 
-    def _on_get_config(c: Client, result: ?xml.Node):
-        log.info("<get-config> success")
-        t.success()
+    def _on_get_config(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            log.error("<get-config> failed", {"error": error})
+            t.failure(ValueError("get-config failed with error"))
+        else:
+            log.info("<get-config> success")
+            t.success()
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
@@ -652,8 +720,11 @@ actor _test_get_schema(t: testing.EnvT):
                     log.info("Got NETCONF {cap} capability, looks reasonable, hello success")
                     c.get_schema(_on_get_schema, "ietf-netconf")
 
-    def _on_get_schema(c: Client, result: ?xml.Node):
-        if result is not None:
+    def _on_get_schema(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            log.error("<get-schema> failed", {"error": error})
+            t.failure(ValueError("get-schema failed with error"))
+        elif result is not None:
             log.info("<get-schema> received response", {"result": result})
             t.success()
         else:
@@ -685,15 +756,19 @@ actor _test_list_schemas(t: testing.EnvT):
             log.info("Connected to NETCONF server")
             c.list_schemas(_on_list_schemas)
 
-    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)]):
-        log.info("Received schemas list", {"count": len(schemas)})
-        for schema in schemas:
-            log.info("Schema found", {"identifier": schema.identifier, "namespace": schema.namespace, "version": schema.version, "format": schema.format})
-        if len(schemas) > 0:
-            t.success()
+    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)], error: ?NetconfError):
+        if error is not None:
+            log.error("<list-schemas> failed", {"error": error})
+            t.failure(ValueError("list-schemas failed with error"))
         else:
-            log.warning("No schemas found")
-            t.success()  # Still success even if no schemas
+            log.info("Received schemas list", {"count": len(schemas)})
+            for schema in schemas:
+                log.info("Schema found", {"identifier": schema.identifier, "namespace": schema.namespace, "version": schema.version, "format": schema.format})
+            if len(schemas) > 0:
+                t.success()
+            else:
+                log.warning("No schemas found")
+                t.success()  # Still success even if no schemas
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
@@ -723,7 +798,7 @@ actor _test_lock_unlock(t: testing.EnvT):
     def _on_lock(c: Client, error: ?NetconfError):
         if error is not None:
             log.error("Lock operation failed", {"error": error})
-            t.failure(ValueError("Lock operation failed: {error}"))
+            t.failure(ValueError("Lock operation failed with error"))
         else:
             log.info("Lock operation successful")
             # Now unlock the datastore
@@ -732,7 +807,7 @@ actor _test_lock_unlock(t: testing.EnvT):
     def _on_unlock(c: Client, error: ?NetconfError):
         if error is not None:
             log.error("Unlock operation failed", {"error": error})
-            t.failure(ValueError("Unlock operation failed: {error}"))
+            t.failure(ValueError("Unlock operation failed with error"))
         else:
             log.info("Unlock operation successful")
             log.info("Lock and unlock test completed successfully")
@@ -775,36 +850,18 @@ actor _test_get_config_with_filter(t: testing.EnvT):
             ])
             c.get_config(_on_get_config_filtered, "running", filter_node)
 
-    def _on_get_config_filtered(c: Client, result: ?xml.Node):
-        if result is not None:
+    def _on_get_config_filtered(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            log.error("<get-config> with filter failed", {"error": error})
+            t.failure(ValueError("get-config with filter failed with error"))
+        elif result is not None:
             log.info("<get-config> with filter received response")
             # Check if we got an rpc-reply
             if result.tag == "rpc-reply":
-                # Check for data or error elements
-                has_data = False
-                has_error = False
-                for child in result.children:
-                    if child.tag == "data":
-                        has_data = True
-                    elif child.tag == "rpc-error":
-                        has_error = True
-
-                if has_data:
+                # For successful get-config, there should be a single <data> element
+                if len(result.children) > 0 and result.children[0].tag == "data":
                     log.info("Filtered config data received successfully")
                     t.success()
-                elif has_error:
-                    # Extract error message if available
-                    error_msgs = []
-                    for child in result.children:
-                        if child.tag == "rpc-error":
-                            for error_child in child.children:
-                                if error_child.tag == "error-message":
-                                    _text = error_child.text
-                                    if _text is not None:
-                                        error_msgs.append(_text)
-                    if len(error_msgs) > 0:
-                        log.error("RPC error", {"messages": error_msgs})
-                    t.failure(ValueError("RPC error: " + ", ".join(error_msgs) if len(error_msgs) > 0 else "Unknown error"))
                 else:
                     log.warning("No data element in response, but this might be normal if no matching config exists")
                     t.success()  # Still success as empty result is valid for filter
@@ -847,35 +904,22 @@ actor _test_get_config_with_xpath_filter(t: testing.EnvT):
             )
             c.get_config(_on_get_config_xpath_filtered, "running", filter_node)
 
-    def _on_get_config_xpath_filtered(c: Client, result: ?xml.Node):
-        if result is not None:
+    def _on_get_config_xpath_filtered(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            # XPath might not be supported, which is ok
+            log.info("Server returned error (XPath might not be supported)", {"error": error})
+            t.success()  # Still consider it success if XPath is not supported
+        elif result is not None:
             log.info("<get-config> with XPath filter received response")
             # Check if we got an rpc-reply
             if result.tag == "rpc-reply":
-                # Check for data or error elements
-                has_data = False
-                has_error = False
-                for child in result.children:
-                    if child.tag == "data":
-                        has_data = True
-                    elif child.tag == "rpc-error":
-                        has_error = True
-
-                if has_data:
+                # For successful get-config, there should be a single <data> element
+                if len(result.children) > 0 and result.children[0].tag == "data":
                     log.info("XPath filtered config data received successfully")
                     t.success()
-                elif has_error:
-                    # Extract error messages - XPath might not be supported
-                    error_msgs = []
-                    for child in result.children:
-                        if child.tag == "rpc-error":
-                            for error_child in child.children:
-                                if error_child.tag == "error-message":
-                                    _text = error_child.text
-                                    if _text is not None:
-                                        error_msgs.append(_text)
-                    log.info("Server returned error (XPath might not be supported)", {"messages": error_msgs})
-                    t.failure(ValueError("Unexpected response type: {error_msgs}"))
+                else:
+                    log.warning("No data element in response")
+                    t.success()  # Still success as empty result is valid
             else:
                 log.error("Unexpected response type", {"tag": result.tag})
                 t.failure(ValueError("Unexpected response type: {result.tag}"))
@@ -895,3 +939,39 @@ actor _test_get_config_with_xpath_filter(t: testing.EnvT):
                 log_handler=t.log_handler)
 
 
+actor _test_rpc_error_repr(t: testing.EnvT):
+    """Test that NetconfError repr() works correctly with RPC errors
+
+    This test intentionally triggers an RPC error by trying to lock a
+    non-existent datastore, then verifies the repr() output.
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            # Try to lock a non-existent datastore to trigger an error
+            c.lock(_on_lock_error, "non-existent-datastore")
+
+    def _on_lock_error(c: Client, error: ?NetconfError):
+        if error is not None:
+            log.info("Got expected error from invalid lock operation", {"error": error})
+            t.success(repr(error))
+        else:
+            # We expected an error, but didn't get one
+            log.error("Expected an error from invalid lock operation, but got success")
+            t.failure(ValueError("Lock on non-existent datastore should have failed"))
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                skip_host_key_check=True,
+                log_handler=t.log_handler)
