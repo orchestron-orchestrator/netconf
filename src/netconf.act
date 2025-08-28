@@ -937,3 +937,41 @@ actor _test_get_config_with_xpath_filter(t: testing.EnvT):
                 port=test_port,
                 skip_host_key_check=True,
                 log_handler=t.log_handler)
+
+
+actor _test_rpc_error_repr(t: testing.EnvT):
+    """Test that NetconfError repr() works correctly with RPC errors
+
+    This test intentionally triggers an RPC error by trying to lock a
+    non-existent datastore, then verifies the repr() output.
+    """
+    log = logging.Logger(t.log_handler)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            # Try to lock a non-existent datastore to trigger an error
+            c.lock(_on_lock_error, "non-existent-datastore")
+
+    def _on_lock_error(c: Client, error: ?NetconfError):
+        if error is not None:
+            log.info("Got expected error from invalid lock operation", {"error": error})
+            t.success(repr(error))
+        else:
+            # We expected an error, but didn't get one
+            log.error("Expected an error from invalid lock operation, but got success")
+            t.failure(ValueError("Lock on non-existent datastore should have failed"))
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                skip_host_key_check=True,
+                log_handler=t.log_handler)
