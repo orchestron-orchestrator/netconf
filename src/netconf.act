@@ -83,7 +83,11 @@ class RpcError(object):
     xml: xml.Node          # raw <rpc-error> XML, including any vendor extension elements
 
     def __init__(self, xml_node: xml.Node):
+        # Initialize all attributes before any references to self escape
         self.xml = xml_node
+        self.error_type = ""  # Will be set from XML, required field
+        self.error_tag = ""   # Will be set from XML, required field
+        self.error_severity = ""  # Will be set from XML, required field
         self.error_app_tag = None
         self.error_path = None
         self.error_message = None
