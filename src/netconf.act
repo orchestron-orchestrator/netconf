@@ -320,8 +320,8 @@ actor Client(
             children.append(filter)
         rpc(xml.Node("get-config", nc_nsdefs, nc_prefix, children=children), cb)
 
-    def edit_config(config: str, cb: action(Client, ?NetconfError) -> None, datastore: str="running") -> None:
-        _log.info("NETCONF edit-config", {"datastore": datastore})
+    def edit_config(config: str, cb: action(Client, ?NetconfError) -> None, datastore: str="running", default_operation: ?str=None) -> None:
+        _log.info("NETCONF edit-config", {"datastore": datastore, "default-operation": default_operation})
         nc_nsdefs = [(nc_prefix, NS_NC_1_0)]
         # Decode the config XML string into xml.Node objects to preserve
         # structure. Direct assignment to text attribute of the <config> node
@@ -331,15 +331,20 @@ actor Client(
         # TODO: this is not very efficient as we decode the XML string to
         # xml.Node only to encode the RPC document again right away.
         config_xml = xml.decode("<data>{config}</data>")
-        rpc(xml.Node("edit-config", nc_nsdefs, nc_prefix, children=[
+        edit_config_children = [
             xml.Node("target", [], nc_prefix, children=[
                 xml.Node(datastore, [], nc_prefix)
-            ]),
-            # Define "xc" namespace prefix for NETCONF operation attributes.
-            # Cisco IOS XRd requires namespace declaration on an ancestor node,
-            # not just where operation attributes are used.
-            xml.Node("config", [("xc", "urn:ietf:params:xml:ns:netconf:base:1.0")], nc_prefix, children=config_xml.children)
-        ]), lambda c, _, err: cb(c, err))
+            ])
+        ]
+        if default_operation is not None:
+            if default_operation not in {"merge", "replace", "none"}:
+                raise ValueError("Invalid default-operation: {default_operation}")
+            edit_config_children.append(xml.Node("default-operation", text=default_operation))
+        # Define "xc" namespace prefix for NETCONF operation attributes.
+        # Cisco IOS XRd requires namespace declaration on an ancestor node,
+        # not just where operation attributes are used.
+        edit_config_children.append(xml.Node("config", [("xc", "urn:ietf:params:xml:ns:netconf:base:1.0")], nc_prefix, children=config_xml.children))
+        rpc(xml.Node("edit-config", nc_nsdefs, nc_prefix, children=edit_config_children), lambda c, _, err: cb(c, err))
 
     def commit(cb: action(Client, ?NetconfError) -> None) -> None:
         _log.info("NETCONF commit", {})
