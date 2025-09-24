@@ -65,7 +65,7 @@ class NetconfError(Exception):
         self.rpc_error = rpc_error
 
     def __str__(self):
-        return "{self._name()}: {self.error_message}"
+        return "{self._name()}: {self.error_message.strip()}"
 
     def __repr__(self):
         return "{self._name()}({repr(self.error_message)}, {repr(self.rpc_error)})"
