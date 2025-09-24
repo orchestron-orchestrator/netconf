@@ -660,6 +660,88 @@ class NsMaps(object):
                 return None
 
 
+actor SchemaGetter(client):
+    """Helper actor for downloading schemas from NETCONF server."""
+
+    def download(on_get_schema: action(int, int, (identifier: str, namespace: ?str, version: ?str, format: str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, identifier_str: str):
+        """Download schemas from a NETCONF server.
+
+        Download one or more schemas from NETCONF server with <get-schema>.
+        Supports downloading either a specific schema by identifier or all
+        available schemas when 'all' is specified.
+
+        Args:
+            on_get_schema: Callback invoked for each schema download. Parameters:
+                - current_index (int): index of current schema being downloaded
+                - total_count (int): Total number of schemas to download
+                - schema_id: (identifier, ?namespace, ?version, format)
+                - schema_data (?str): Schema content if successful, None on error
+                - error (?NetconfError): None if successful, error details if failed
+            on_done: Callback invoked when all downloads complete. Parameter:
+                - error (?NetconfError): None if successful, error details if failed
+            identifier_str: Schema identifier to download, or 'all' to download all available schemas
+        """
+        schemas_to_download: list[(identifier: str, namespace: ?str, version: ?str, format: str)] = []
+        current_download_index = 0
+
+        def _on_list_schemas(c: Client, schemas: list[(identifier: str, namespace: str, version: str, format: str)], error: ?NetconfError):
+            """Handle schema list response"""
+            if error is not None:
+                on_done(error)
+                return
+
+            # Only download yang format (not yin) to avoid duplicates
+            for schema in schemas:
+                if schema.format == "yang":
+                    schemas_to_download.append((identifier=schema.identifier, namespace=schema.namespace, version=schema.version, format=schema.format))
+
+            _download_next_schema()
+
+        def _download_next_schema():
+            """Download the next schema in the queue"""
+            if current_download_index >= len(schemas_to_download):
+                # All schemas downloaded successfully
+                on_done()
+                return
+            schema = schemas_to_download[current_download_index]
+
+            # Use "yang" as default format if not specified
+            format_str = schema.format if schema.format is not None else "yang"
+            client.get_schema(_on_get_schema, schema.identifier, schema.version, format_str)
+
+        def _on_get_schema(c: Client, result: ?xml.Node, error: ?NetconfError):
+            """Handle individual schema response"""
+            schema = schemas_to_download[current_download_index]
+            if error is not None:
+                on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, error)
+            else:
+                # Extract schema data
+                schema_data = None
+                if result is not None:
+                    for child in result.children:
+                        if child.tag == "data":
+                            schema_data = child.text
+                            break
+
+                # Call the callback with current progress and schema data
+                if schema_data is not None:
+                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, schema_data)
+                else:
+                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, NetconfError("Missing schema data"))
+
+            # Move to next schema
+            current_download_index += 1
+            _download_next_schema()
+
+        if identifier_str == "all":
+            # Get list of all schemas first
+            client.list_schemas(_on_list_schemas)
+        else:
+            # Download single schema
+            schemas_to_download.append((identifier=identifier_str, namespace=None, version=None, format="yang"))
+            _download_next_schema()
+
+
 ################################################################################
 ## Tests                                                                      ##
 ################################################################################
