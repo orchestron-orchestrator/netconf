@@ -65,7 +65,7 @@ class NetconfError(Exception):
         self.rpc_error = rpc_error
 
     def __str__(self):
-        return "{self._name()}: {self.error_message}"
+        return "{self._name()}: {self.error_message.strip()}"
 
     def __repr__(self):
         return "{self._name()}({repr(self.error_message)}, {repr(self.rpc_error)})"
@@ -384,7 +384,7 @@ actor Client(
         children.append(xml.Node("format", text=format))
         rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
 
-    def list_schemas(cb: action(Client, list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)], ?NetconfError) -> None) -> None:
+    def list_schemas(cb: action(Client, list[(identifier: str, namespace: str, version: str, format: str)], ?NetconfError) -> None) -> None:
         """List available schemas and return parsed list of (identifier, version, format) tuples"""
         _log.info("NETCONF list-schemas")
 
@@ -400,7 +400,7 @@ actor Client(
                             schemas = _parse_schemas_data(child)
             cb(c, schemas, None)
 
-        def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str, ?str)]:
+        def _parse_schemas_data(data_node: xml.Node) -> list[(str, str, str, str)]:
             schemas = []
             for netconf_state in data_node.children:
                 if netconf_state.tag == "netconf-state":
@@ -422,7 +422,7 @@ actor Client(
                                             version = attr_text
                                         elif attr.tag == "format" and attr_text is not None:
                                             format = attr_text
-                                    if identifier is not None:
+                                    if identifier is not None and namespace is not None and version is not None and format is not None:
                                         schemas.append((identifier, namespace, version, format))
             return schemas
 
@@ -660,6 +660,88 @@ class NsMaps(object):
                 return None
 
 
+actor SchemaGetter(client):
+    """Helper actor for downloading schemas from NETCONF server."""
+
+    def download(on_get_schema: action(int, int, (identifier: str, namespace: ?str, version: ?str, format: str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, identifier_str: str):
+        """Download schemas from a NETCONF server.
+
+        Download one or more schemas from NETCONF server with <get-schema>.
+        Supports downloading either a specific schema by identifier or all
+        available schemas when 'all' is specified.
+
+        Args:
+            on_get_schema: Callback invoked for each schema download. Parameters:
+                - current_index (int): index of current schema being downloaded
+                - total_count (int): Total number of schemas to download
+                - schema_id: (identifier, ?namespace, ?version, format)
+                - schema_data (?str): Schema content if successful, None on error
+                - error (?NetconfError): None if successful, error details if failed
+            on_done: Callback invoked when all downloads complete. Parameter:
+                - error (?NetconfError): None if successful, error details if failed
+            identifier_str: Schema identifier to download, or 'all' to download all available schemas
+        """
+        schemas_to_download: list[(identifier: str, namespace: ?str, version: ?str, format: str)] = []
+        current_download_index = 0
+
+        def _on_list_schemas(c: Client, schemas: list[(identifier: str, namespace: str, version: str, format: str)], error: ?NetconfError):
+            """Handle schema list response"""
+            if error is not None:
+                on_done(error)
+                return
+
+            # Only download yang format (not yin) to avoid duplicates
+            for schema in schemas:
+                if schema.format == "yang":
+                    schemas_to_download.append((identifier=schema.identifier, namespace=schema.namespace, version=schema.version, format=schema.format))
+
+            _download_next_schema()
+
+        def _download_next_schema():
+            """Download the next schema in the queue"""
+            if current_download_index >= len(schemas_to_download):
+                # All schemas downloaded successfully
+                on_done()
+                return
+            schema = schemas_to_download[current_download_index]
+
+            # Use "yang" as default format if not specified
+            format_str = schema.format if schema.format is not None else "yang"
+            client.get_schema(_on_get_schema, schema.identifier, schema.version, format_str)
+
+        def _on_get_schema(c: Client, result: ?xml.Node, error: ?NetconfError):
+            """Handle individual schema response"""
+            schema = schemas_to_download[current_download_index]
+            if error is not None:
+                on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, error)
+            else:
+                # Extract schema data
+                schema_data = None
+                if result is not None:
+                    for child in result.children:
+                        if child.tag == "data":
+                            schema_data = child.text
+                            break
+
+                # Call the callback with current progress and schema data
+                if schema_data is not None:
+                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, schema_data)
+                else:
+                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, NetconfError("Missing schema data"))
+
+            # Move to next schema
+            current_download_index += 1
+            _download_next_schema()
+
+        if identifier_str == "all":
+            # Get list of all schemas first
+            client.list_schemas(_on_list_schemas)
+        else:
+            # Download single schema
+            schemas_to_download.append((identifier=identifier_str, namespace=None, version=None, format="yang"))
+            _download_next_schema()
+
+
 ################################################################################
 ## Tests                                                                      ##
 ################################################################################
@@ -779,6 +861,52 @@ actor _test_list_schemas(t: testing.EnvT):
             else:
                 log.warning("No schemas found")
                 t.success()  # Still success even if no schemas
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                skip_host_key_check=True,
+                log_handler=t.log_handler)
+
+
+actor _test_schema_getter(t: testing.EnvT):
+    """Test listing available schemas from a NETCONF server
+    """
+    log = logging.Logger(t.log_handler)
+    expected = 0
+    count = 0
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            sg = SchemaGetter(c)
+            sg.download(_on_schema_download, _on_download_complete, "all")
+
+    def _on_schema_download(index: int, total: int, schema_id: (identifier: str, namespace: ?str, version: ?str, format: str), schema_data, error):
+        expected = total
+        log.debug("Download {index}/{total} {schema_id.identifier}")
+        if error is not None:
+            t.failure(Exception("{schema_id.identifier}: {error}"))
+        elif schema_data is None:
+            t.failure(Exception("{schema_id.identifier}: empty"))
+        else:
+            count += 1
+
+    def _on_download_complete(error):
+        if count != expected:
+            t.failure(ValueError("Incorrect count: {count} != {expected}"))
+        elif error is not None:
+            t.failure(error)
+        else:
+            t.success()
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
