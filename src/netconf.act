@@ -874,6 +874,52 @@ actor _test_list_schemas(t: testing.EnvT):
                 log_handler=t.log_handler)
 
 
+actor _test_schema_getter(t: testing.EnvT):
+    """Test listing available schemas from a NETCONF server
+    """
+    log = logging.Logger(t.log_handler)
+    expected = 0
+    count = 0
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            log.error("Failed to connect", {"error": e})
+            t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
+        else:
+            log.info("Connected to NETCONF server")
+            sg = SchemaGetter(c)
+            sg.download(_on_schema_download, _on_download_complete, "all")
+
+    def _on_schema_download(index: int, total: int, schema_id: (identifier: str, namespace: ?str, version: ?str, format: str), schema_data, error):
+        expected = total
+        log.debug("Download {index}/{total} {schema_id.identifier}")
+        if error is not None:
+            t.failure(Exception("{schema_id.identifier}: {error}"))
+        elif schema_data is None:
+            t.failure(Exception("{schema_id.identifier}: empty"))
+        else:
+            count += 1
+
+    def _on_download_complete(error):
+        if count != expected:
+            t.failure(ValueError("Incorrect count: {count} != {expected}"))
+        elif error is not None:
+            t.failure(error)
+        else:
+            t.success()
+
+    c = Client(t.env.auth,
+                on_connect=_on_connect,
+                on_notif=None,
+                address=test_address,
+                username=test_username,
+                key=None,
+                password=test_password,
+                port=test_port,
+                skip_host_key_check=True,
+                log_handler=t.log_handler)
+
+
 actor _test_lock_unlock(t: testing.EnvT):
     """Test lock and unlock operations on a datastore
     """
