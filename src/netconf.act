@@ -384,7 +384,7 @@ actor Client(
         children.append(xml.Node("format", text=format))
         rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
 
-    def list_schemas(cb: action(Client, list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)], ?NetconfError) -> None) -> None:
+    def list_schemas(cb: action(Client, list[(identifier: str, namespace: str, version: str, format: str)], ?NetconfError) -> None) -> None:
         """List available schemas and return parsed list of (identifier, version, format) tuples"""
         _log.info("NETCONF list-schemas")
 
@@ -400,7 +400,7 @@ actor Client(
                             schemas = _parse_schemas_data(child)
             cb(c, schemas, None)
 
-        def _parse_schemas_data(data_node: xml.Node) -> list[(?str, ?str, ?str, ?str)]:
+        def _parse_schemas_data(data_node: xml.Node) -> list[(str, str, str, str)]:
             schemas = []
             for netconf_state in data_node.children:
                 if netconf_state.tag == "netconf-state":
@@ -422,7 +422,7 @@ actor Client(
                                             version = attr_text
                                         elif attr.tag == "format" and attr_text is not None:
                                             format = attr_text
-                                    if identifier is not None:
+                                    if identifier is not None and namespace is not None and version is not None and format is not None:
                                         schemas.append((identifier, namespace, version, format))
             return schemas
 
