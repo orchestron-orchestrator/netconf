@@ -813,47 +813,34 @@ class NsMaps(object):
 actor SchemaGetter(client):
     """Helper actor for downloading schemas from NETCONF server."""
 
-    def download(on_get_schema: action(int, int, (identifier: str, namespace: ?str, version: ?str, format: str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, identifier_str: str):
+    def download(on_get_schema: action(int, int, (identifier: str, version: ?str, format: ?str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, schemas: list[(identifier: str, version: ?str, format: ?str)]):
         """Download schemas from a NETCONF server.
 
-        Download one or more schemas from NETCONF server with <get-schema>.
-        Supports downloading either a specific schema by identifier or all
-        available schemas when 'all' is specified.
+        Download a list of schemas from NETCONF server with <get-schema>.
+        Users should prepare the schema list themselves, typically by calling
+        list_schemas() first and applying any necessary filtering.
 
         Args:
             on_get_schema: Callback invoked for each schema download. Parameters:
                 - current_index (int): index of current schema being downloaded
                 - total_count (int): Total number of schemas to download
-                - schema_id: (identifier, ?namespace, ?version, format)
+                - schema_id: (identifier, ?version, ?format)
                 - schema_data (?str): Schema content if successful, None on error
                 - error (?NetconfError): None if successful, error details if failed
             on_done: Callback invoked when all downloads complete. Parameter:
                 - error (?NetconfError): None if successful, error details if failed
-            identifier_str: Schema identifier to download, or 'all' to download all available schemas
+            schemas: List of schemas to download, each as named tuple (identifier, ?version, ?format)
+            TODO: ideally this would be a set of tuples, once named tuples are *Hashable*
         """
-        schemas_to_download: list[(identifier: str, namespace: ?str, version: ?str, format: str)] = []
         current_download_index = 0
-
-        def _on_list_schemas(c: Client, schemas: list[(identifier: str, namespace: str, version: str, format: str)], error: ?NetconfError):
-            """Handle schema list response"""
-            if error is not None:
-                on_done(error)
-                return
-
-            # Only download yang format (not yin) to avoid duplicates
-            for schema in schemas:
-                if schema.format == "yang":
-                    schemas_to_download.append((identifier=schema.identifier, namespace=schema.namespace, version=schema.version, format=schema.format))
-
-            _download_next_schema()
 
         def _download_next_schema():
             """Download the next schema in the queue"""
-            if current_download_index >= len(schemas_to_download):
+            if current_download_index >= len(schemas):
                 # All schemas downloaded successfully
                 on_done()
                 return
-            schema = schemas_to_download[current_download_index]
+            schema = schemas[current_download_index]
 
             # Use "yang" as default format if not specified
             format_str = schema.format if schema.format is not None else "yang"
@@ -861,9 +848,9 @@ actor SchemaGetter(client):
 
         def _on_get_schema(c: Client, result: ?xml.Node, error: ?NetconfError):
             """Handle individual schema response"""
-            schema = schemas_to_download[current_download_index]
+            schema = schemas[current_download_index]
             if error is not None:
-                on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, error)
+                on_get_schema(current_download_index+1, len(schemas), schema, None, error)
             else:
                 # Extract schema data
                 schema_data = None
@@ -875,21 +862,15 @@ actor SchemaGetter(client):
 
                 # Call the callback with current progress and schema data
                 if schema_data is not None and schema_data.strip() != "":
-                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, schema_data)
+                    on_get_schema(current_download_index+1, len(schemas), schema, schema_data)
                 else:
-                    on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, NetconfError("Missing schema data"))
+                    on_get_schema(current_download_index+1, len(schemas), schema, None, NetconfError("Missing schema data"))
 
             # Move to next schema
             current_download_index += 1
             _download_next_schema()
 
-        if identifier_str == "all":
-            # Get list of all schemas first
-            client.list_schemas(_on_list_schemas)
-        else:
-            # Download single schema
-            schemas_to_download.append((identifier=identifier_str, namespace=None, version=None, format="yang"))
-            _download_next_schema()
+        _download_next_schema()
 
 
 ################################################################################
@@ -1037,10 +1018,25 @@ actor _test_schema_getter(t: testing.EnvT):
             t.failure(ValueError("Failed to connect to NETCONF server: {e}"))
         else:
             log.info("Connected to NETCONF server")
-            sg = SchemaGetter(c)
-            sg.download(_on_schema_download, _on_download_complete, "all")
+            # First list all available schemas
+            c.list_schemas(_on_list_schemas)
 
-    def _on_schema_download(index: int, total: int, schema_id: (identifier: str, namespace: ?str, version: ?str, format: str), schema_data, error):
+    def _on_list_schemas(c: Client, schemas: list[(identifier: str, namespace: str, version: str, format: str)], error: ?NetconfError):
+        if error is not None:
+            log.error("Failed to list schemas", {"error": error})
+            t.failure(error)
+            return
+
+        # TODO: would it be possible to pass the schemas list directly to
+        # SchemaGetter.download(..., schemas: list[(identifier: str, version: ?str, format: ?str)])
+        # Note how that named tuple has a subset of our arguments, some are even optional ...
+        schemas_to_download = [(identifier=s.identifier, version=s.version, format=s.format) for s in schemas]
+
+        log.info("Starting download of schemas", {"count": len(schemas_to_download)})
+        sg = SchemaGetter(c)
+        sg.download(_on_schema_download, _on_download_complete, schemas_to_download)
+
+    def _on_schema_download(index: int, total: int, schema_id: (identifier: str, version: ?str, format: ?str), schema_data, error):
         expected = total
         log.debug("Download {index}/{total} {schema_id.identifier}")
         if error is not None:
