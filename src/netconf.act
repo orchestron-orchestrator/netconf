@@ -663,7 +663,7 @@ class NsMaps(object):
 actor SchemaGetter(client):
     """Helper actor for downloading schemas from NETCONF server."""
 
-    def download(on_get_schema: action(int, int, (identifier: str, namespace: ?str, version: ?str, format: str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, identifier_str: str):
+    def download(on_get_schema: action(int, int, (identifier: str, namespace: ?str, version: ?str, format: str), ?str, ?NetconfError) -> None, on_done: action(?NetconfError) -> None, identifier_str: str, filter: ?action(str) -> bool = None):
         """Download schemas from a NETCONF server.
 
         Download one or more schemas from NETCONF server with <get-schema>.
@@ -680,6 +680,7 @@ actor SchemaGetter(client):
             on_done: Callback invoked when all downloads complete. Parameter:
                 - error (?NetconfError): None if successful, error details if failed
             identifier_str: Schema identifier to download, or 'all' to download all available schemas
+            filter: Optional filter function to determine which schemas to download (only used with 'all')
         """
         schemas_to_download: list[(identifier: str, namespace: ?str, version: ?str, format: str)] = []
         current_download_index = 0
@@ -690,10 +691,15 @@ actor SchemaGetter(client):
                 on_done(error)
                 return
 
-            # Only download yang format (not yin) to avoid duplicates
+            # Only download yang format (not yin) to avoid duplicates, apply filter if provided
             for schema in schemas:
                 if schema.format == "yang":
-                    schemas_to_download.append((identifier=schema.identifier, namespace=schema.namespace, version=schema.version, format=schema.format))
+                    if filter is not None:
+                        include = filter(schema.identifier)
+                    else:
+                        include = True
+                    if include:
+                        schemas_to_download.append((identifier=schema.identifier, namespace=schema.namespace, version=schema.version, format=schema.format))
 
             _download_next_schema()
 
