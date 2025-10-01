@@ -724,7 +724,7 @@ actor SchemaGetter(client):
                             break
 
                 # Call the callback with current progress and schema data
-                if schema_data is not None:
+                if schema_data is not None and schema_data.strip() != "":
                     on_get_schema(current_download_index+1, len(schemas_to_download), schema, schema_data)
                 else:
                     on_get_schema(current_download_index+1, len(schemas_to_download), schema, None, NetconfError("Missing schema data"))
