@@ -947,8 +947,8 @@ actor _test_get_schema(t: testing.EnvT):
             log.error("<get-schema> failed", {"error": error})
             t.failure(ValueError("get-schema failed with error"))
         elif result is not None:
-            log.info("<get-schema> received response", {"result": result})
-            t.success()
+            log.info("<get-schema> received response", {"result": result.encode()})
+            t.success(result.encode())
         else:
             log.error("<get-schema> received null response")
             t.failure(ValueError("get-schema returned null"))
@@ -978,19 +978,19 @@ actor _test_list_schemas(t: testing.EnvT):
             log.info("Connected to NETCONF server")
             c.list_schemas(_on_list_schemas)
 
-    def _on_list_schemas(c: Client, schemas: list[(identifier: ?str, namespace: ?str, version: ?str, format: ?str)], error: ?NetconfError):
+    def _on_list_schemas(c: Client, schemas: list[(identifier: str, namespace: str, version: str, format: str)], error: ?NetconfError):
         if error is not None:
             log.error("<list-schemas> failed", {"error": error})
-            t.failure(ValueError("list-schemas failed with error"))
+            t.failure(error)
         else:
             log.info("Received schemas list", {"count": len(schemas)})
             for schema in schemas:
                 log.info("Schema found", {"identifier": schema.identifier, "namespace": schema.namespace, "version": schema.version, "format": schema.format})
             if len(schemas) > 0:
-                t.success()
+                t.success("\n".join([s.__repr__() for s in schemas]))
             else:
                 log.warning("No schemas found")
-                t.success()  # Still success even if no schemas
+                t.failure(Exception("No schemas found"))
 
     c = Client(t.env.auth,
                 on_connect=_on_connect,
