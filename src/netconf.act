@@ -468,6 +468,7 @@ actor Client(
                                         name = None
                                         namespace = None
                                         revision = None
+                                        submodules: list[(name: str, revision: str)] = []
                                         for attr in ms_child.children:
                                             attr_text = attr.text
                                             if attr.tag == "name" and attr_text is not None:
@@ -476,9 +477,28 @@ actor Client(
                                                 namespace = attr_text
                                             elif attr.tag == "revision" and attr_text is not None:
                                                 revision = attr_text
+                                            elif attr.tag == "submodule":
+                                                # Parse submodule information
+                                                submod_name = None
+                                                submod_revision = None
+                                                for submod_attr in attr.children:
+                                                    submod_text = submod_attr.text
+                                                    if submod_attr.tag == "name" and submod_text is not None:
+                                                        submod_name = submod_text
+                                                    elif submod_attr.tag == "revision" and submod_text is not None:
+                                                        submod_revision = submod_text
+                                                if submod_name is not None:
+                                                    submod_version = submod_revision if submod_revision is not None else ""
+                                                    submodules.append((name=submod_name, revision=submod_version))
+
+                                        # Add the main module
                                         if name is not None and namespace is not None:
                                             version = revision if revision is not None else ""
                                             schemas.append((identifier=name, namespace=namespace, version=version, format="yang"))
+
+                                            # Add all submodules (they inherit namespace from parent module)
+                                            for submod in submodules:
+                                                schemas.append((identifier=submod.name, namespace=namespace, version=submod.revision, format="yang"))
 
             return schemas
 
