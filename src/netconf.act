@@ -385,22 +385,121 @@ actor Client(
         rpc(xml.Node("get-schema", nc_nsdefs, children=children), cb)
 
     def list_schemas(cb: action(Client, list[(identifier: str, namespace: str, version: str, format: str)], ?NetconfError) -> None) -> None:
-        """List available schemas and return parsed list of (identifier, version, format) tuples"""
+        """List available schemas and return parsed list of (identifier, namespace, version, format) tuples
+
+        Uses ietf-yang-library (RFC 8525) if available, which returns modules used by
+        the running datastore. Falls back to ietf-netconf-monitoring (RFC 6022) which
+        returns all schemas available on the device.
+        """
         _log.info("NETCONF list-schemas")
 
-        def _parse_response(c: Client, result: ?xml.Node, error: ?NetconfError):
-            schemas = []
+        def parse_response_yang_library(c: Client, result: ?xml.Node, error: ?NetconfError):
+            """Parse response from ietf-yang-library query"""
             if error is not None:
-                # Pass empty list if there are errors
-                cb(c, schemas, error)
-            elif result is not None:
-                if result.tag == "rpc-reply":
-                    for child in result.children:
-                        if child.tag == "data":
-                            schemas = _parse_schemas_data(child)
+                _log.error("ietf-yang-library query failed", {"error": error})
+                cb(c, [], error)
+                return
+
+            schemas = []
+            if result is not None and result.tag == "rpc-reply":
+                for child in result.children:
+                    if child.tag == "data":
+                        schemas = parse_yang_library_data(child)
+                        _log.debug("Found schemas in yang-library", {"count": len(schemas)})
+
             cb(c, schemas, None)
 
-        def _parse_schemas_data(data_node: xml.Node) -> list[(str, str, str, str)]:
+        def parse_yang_library_data(data_node: xml.Node) -> list[(identifier: str, namespace: str, version: str, format: str)]:
+            """Parse module data from ietf-yang-library response
+
+            1. Find the running datastore's schema
+            2. Get the module-sets referenced by that schema
+            3. Collect modules from those module-sets
+            """
+            schemas = []
+            running_schema_name = None
+            target_module_sets: list[str] = []
+
+            # TODO: parse this with schema-driven parser and convert to adata?!
+            for yang_library in data_node.children:
+                if yang_library.tag == "yang-library":
+                    # First: Find the schema used by the running datastore
+                    for child in yang_library.children:
+                        if child.tag == "datastore":
+                            datastore_name = None
+                            schema_name = None
+                            for ds_child in child.children:
+                                if ds_child.tag == "name":
+                                    datastore_name = ds_child.text
+                                elif ds_child.tag == "schema":
+                                    schema_name = ds_child.text
+                            # Look for the running datastore
+                            if datastore_name in ["ietf-datastores:running", "running", "ds:running"] and schema_name is not None:
+                                running_schema_name = schema_name
+                                break
+
+                    # Second: Find which module-sets are used by the running schema
+                    if running_schema_name is not None:
+                        for child in yang_library.children:
+                            if child.tag == "schema":
+                                schema_name = None
+                                for schema_child in child.children:
+                                    if schema_child.tag == "name":
+                                        schema_name = schema_child.text
+                                    elif schema_child.tag == "module-set" and schema_name == running_schema_name:
+                                        ms_text = schema_child.text
+                                        if ms_text is not None:
+                                            target_module_sets.append(ms_text)
+
+                    # Third: Collect modules from the target module-sets
+                    for child in yang_library.children:
+                        if child.tag == "module-set":
+                            module_set_name: ?str = None
+                            # First find the module-set name
+                            for ms_child in child.children:
+                                if ms_child.tag == "name":
+                                    module_set_name = ms_child.text
+                                    break
+
+                            # Then collect modules if this module-set is in our target list
+                            if module_set_name is not None and module_set_name in target_module_sets:
+                                for ms_child in child.children:
+                                    if ms_child.tag == "module" or ms_child.tag == "import-only-module":
+                                        name = None
+                                        namespace = None
+                                        revision = None
+                                        for attr in ms_child.children:
+                                            attr_text = attr.text
+                                            if attr.tag == "name" and attr_text is not None:
+                                                name = attr_text
+                                            elif attr.tag == "namespace" and attr_text is not None:
+                                                namespace = attr_text
+                                            elif attr.tag == "revision" and attr_text is not None:
+                                                revision = attr_text
+                                        if name is not None and namespace is not None:
+                                            version = revision if revision is not None else ""
+                                            schemas.append((identifier=name, namespace=namespace, version=version, format="yang"))
+
+            return schemas
+
+        def parse_response_netconf_monitoring(c: Client, result: ?xml.Node, error: ?NetconfError):
+            """Parse response from ietf-netconf-monitoring query"""
+            if error is not None:
+                _log.error("ietf-netconf-monitoring query failed", {"error": error})
+                cb(c, [], error)
+                return
+
+            schemas = []
+            if result is not None and result.tag == "rpc-reply":
+                for child in result.children:
+                    if child.tag == "data":
+                        schemas = parse_netconf_monitoring_data(child)
+                        _log.debug("Found schemas in netconf-monitoring", {"count": len(schemas)})
+
+            cb(c, schemas, None)
+
+        def parse_netconf_monitoring_data(data_node: xml.Node) -> list[(identifier: str, namespace: str, version: str, format: str)]:
+            """Parse schema data from ietf-netconf-monitoring response"""
             schemas = []
             for netconf_state in data_node.children:
                 if netconf_state.tag == "netconf-state":
@@ -423,17 +522,48 @@ actor Client(
                                         elif attr.tag == "format" and attr_text is not None:
                                             format = attr_text
                                     if identifier is not None and namespace is not None and version is not None and format is not None:
-                                        schemas.append((identifier, namespace, version, format))
+                                        schemas.append((identifier=identifier, namespace=namespace, version=version, format=format))
             return schemas
 
-        # Create filter for /netconf-state/schemas from ietf-netconf-monitoring
-        filter_node = xml.Node("filter", None, None, [("type", "subtree")], [
-            xml.Node("netconf-state",
-                [(None, "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring")],
-                children=[xml.Node("schemas")]
-            )
-        ], None, None)
-        get(_parse_response, filter_node)
+        # Check what capabilities the server supports
+        supports_yang_library = False
+        supports_netconf_monitoring = False
+
+        for cap in capabilities:
+            if "urn:ietf:params:netconf:capability:yang-library" in cap:
+                supports_yang_library = True
+            if "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring" in cap:
+                supports_netconf_monitoring = True
+
+        # Use yang-library if available (preferred), otherwise netconf-monitoring
+        if supports_yang_library:
+            _log.debug("Using ietf-yang-library for schema discovery")
+            # Get the complete yang-library data including:
+            # - datastore definitions (to know which module-sets each datastore uses)
+            # - module-sets (containing modules and import-only-modules)
+            filter_node = xml.Node("filter", None, None, [("type", "subtree")], [
+                xml.Node("yang-library",
+                    [(None, "urn:ietf:params:xml:ns:yang:ietf-yang-library")],
+                    children=[
+                        xml.Node("datastore"),
+                        xml.Node("schema"),
+                        xml.Node("module-set")
+                    ]
+                )
+            ], None, None)
+            get(parse_response_yang_library, filter_node)
+        elif supports_netconf_monitoring:
+            _log.debug("Using ietf-netconf-monitoring for schema discovery")
+            filter_node = xml.Node("filter", None, None, [("type", "subtree")], [
+                xml.Node("netconf-state",
+                    [(None, "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring")],
+                    children=[xml.Node("schemas")]
+                )
+            ], None, None)
+            get(parse_response_netconf_monitoring, filter_node)
+        else:
+            # No schema discovery methods advertised
+            cb(self, [], NetconfError("No schema discovery method advertised (neither ietf-yang-library nor ietf-netconf-monitoring)"))
 
     def rpc_action(content: xml.Node, callback: action(Client, ?xml.Node, ?NetconfError) -> None) -> None:
         action_node = xml.Node("action", [(None, NS_YANG_ACTION)], None, [], [content], None, None)
