@@ -12,7 +12,7 @@ jobs:
           channel: 'tip'
       - name: "Check out repository code"
         uses: actions/checkout@v4
-      - run: acton build --dev
+      - run: acton build
       - name: "Start notconf in background"
         run: |
           docker run -td --name notconf --publish 42830:830 ghcr.io/notconf/notconf
