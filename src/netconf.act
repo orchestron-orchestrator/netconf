@@ -832,9 +832,7 @@ actor SchemaGetter(client):
             schemas: List of schemas to download, each as named tuple (identifier, ?version, ?format)
             TODO: ideally this would be a set of tuples, once named tuples are *Hashable*
         """
-        current_download_index = 0
-
-        def _download_next_schema():
+        def _download_next_schema(current_download_index):
             """Download the next schema in the queue"""
             if current_download_index >= len(schemas):
                 # All schemas downloaded successfully
@@ -844,9 +842,12 @@ actor SchemaGetter(client):
 
             # Use "yang" as default format if not specified
             format_str = schema.format if schema.format is not None else "yang"
-            client.get_schema(_on_get_schema, schema.identifier, schema.version, format_str)
+            client.get_schema(
+                lambda c, r, e: _on_get_schema(current_download_index, c, r, e),
+                schema.identifier, schema.version, format_str
+            )
 
-        def _on_get_schema(c: Client, result: ?xml.Node, error: ?NetconfError):
+        def _on_get_schema(current_download_index, c: Client, result: ?xml.Node, error: ?NetconfError):
             """Handle individual schema response"""
             schema = schemas[current_download_index]
             if error is not None:
@@ -867,10 +868,9 @@ actor SchemaGetter(client):
                     on_get_schema(self, current_download_index+1, len(schemas), schema, None, NetconfError("Missing schema data"))
 
             # Move to next schema
-            current_download_index += 1
-            _download_next_schema()
+            _download_next_schema(current_download_index + 1)
 
-        _download_next_schema()
+        _download_next_schema(0)
 
 
 ################################################################################
