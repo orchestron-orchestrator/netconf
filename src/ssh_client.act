@@ -350,7 +350,7 @@ actor client(env: Env):
     log = logging.Logger(log_handler)
     log.info("Starting up", None)
 
-    state = 0
+    var state = 0
 
     def _on_connect(c: Client, e: ?Exception):
         log.info("on_connect called", {"state": state, "e": e})

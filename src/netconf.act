@@ -1002,7 +1002,7 @@ actor _test_schema_getter(t: testing.EnvT):
     """
     log = logging.Logger(t.log_handler)
     expected = 0
-    count = 0
+    var count = 0
 
     def _on_connect(c: Client, e: ?Exception):
         if e is not None:
