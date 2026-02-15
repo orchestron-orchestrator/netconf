@@ -1,0 +1,4 @@
+name = "netconf"
+fingerprint = 0x27396694e68d5747
+dependencies = {}
+zig_dependencies = {}
