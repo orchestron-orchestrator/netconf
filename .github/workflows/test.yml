@@ -16,5 +16,5 @@ jobs:
       - name: "Start notconf in background"
         run: |
           docker run -td --name notconf --publish 42830:830 ghcr.io/notconf/notconf
-      # Only run the netconf module tests, something is broken in ssh_client ...
-      - run: acton test --module netconf
+      # notconf is stateful and module tests are sensitive to parallel/retry runs
+      - run: acton test --module netconf --jobs 1 --min-iter 1 --max-iter 1
