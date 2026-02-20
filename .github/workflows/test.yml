@@ -17,4 +17,4 @@ jobs:
         run: |
           docker run -td --name notconf --publish 42830:830 ghcr.io/notconf/notconf
       # notconf is stateful and module tests are sensitive to parallel/retry runs
-      - run: acton test --module netconf --jobs 1 --min-iter 1 --max-iter 1
+      - run: acton test --tag notconf-server --module netconf --jobs 1 --min-iter 1 --max-iter 1
