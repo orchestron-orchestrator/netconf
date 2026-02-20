@@ -886,6 +886,7 @@ test_password = "admin"
 actor _test_netconf(t: testing.EnvT):
     """Test SSH client towards a NETCONF server, like notconf
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -922,6 +923,7 @@ actor _test_netconf(t: testing.EnvT):
 actor _test_get_schema(t: testing.EnvT):
     """Test SSH client get-schema operation towards a NETCONF server
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -961,6 +963,7 @@ actor _test_get_schema(t: testing.EnvT):
 actor _test_list_schemas(t: testing.EnvT):
     """Test listing available schemas from a NETCONF server
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -1000,6 +1003,7 @@ actor _test_list_schemas(t: testing.EnvT):
 actor _test_schema_getter(t: testing.EnvT):
     """Test listing available schemas from a NETCONF server
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
     expected = 0
     var count = 0
@@ -1061,6 +1065,7 @@ actor _test_schema_getter(t: testing.EnvT):
 actor _test_lock_unlock(t: testing.EnvT):
     """Test lock and unlock operations on a datastore
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -1104,6 +1109,7 @@ actor _test_lock_unlock(t: testing.EnvT):
 actor _test_get_config_with_filter(t: testing.EnvT):
     """Test get-config operation with a subtree filter
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -1163,6 +1169,7 @@ actor _test_get_config_with_filter(t: testing.EnvT):
 actor _test_get_config_with_xpath_filter(t: testing.EnvT):
     """Test get-config operation with an XPath filter
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -1221,6 +1228,7 @@ actor _test_rpc_error_repr(t: testing.EnvT):
     This test intentionally triggers an RPC error by trying to lock a
     non-existent datastore, then verifies the repr() output.
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):

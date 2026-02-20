@@ -262,6 +262,7 @@ test_password = "admin"
 actor _test_bad_credentials(t: testing.EnvT):
     """Test SSH client with bad credentials
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -287,6 +288,7 @@ actor _test_bad_credentials(t: testing.EnvT):
 actor _test_netconf(t: testing.EnvT):
     """Test SSH client towards a NETCONF server, like notconf
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     def _on_connect(c: Client, e: ?Exception):
@@ -315,6 +317,7 @@ actor _test_netconf(t: testing.EnvT):
 actor _test_restart(t: testing.EnvT):
     """Test SSH client towards NOTCONF
     """
+    t.require("notconf-server")
     log = logging.Logger(t.log_handler)
 
     var connects = 1
