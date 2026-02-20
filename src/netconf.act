@@ -20,7 +20,7 @@ import testing
 import xml
 
 from buffer import Buffer, IncompleteReadError
-import ssh_client
+from transport import Pipe, SshPipe, actor_pipe_pair
 
 SEPARATOR_FRAMING: int = 0
 CHUNKED_FRAMING: int = 1
@@ -33,6 +33,7 @@ CHUNK_TAG_PREFIX: bytes = "\n#".encode()
 CHUNK_TAG_END_OF_MSG: bytes = "#".encode()
 CHUNK_TAG_POSTFIX: bytes = "\n".encode()
 
+CAP_NC_1_0 = "urn:ietf:params:netconf:base:1.0"
 CAP_NC_1_1 = "urn:ietf:params:netconf:base:1.1"
 
 NS_NC_1_0 = "urn:ietf:params:xml:ns:netconf:base:1.0"
@@ -160,7 +161,8 @@ actor Client(
         on_connect: action(Client, ?Exception) -> None,
         on_notif: ?action(Client, xml.Node) -> None,
         skip_host_key_check: bool=False,
-        log_handler: ?logging.Handler):
+        log_handler: ?logging.Handler,
+        pipe: ?Pipe=None):
 
     _log = logging.Logger(log_handler)
     _log.info("Connecting to " + address + ":" + str(port) + " as " + username)
@@ -199,7 +201,7 @@ actor Client(
     var message_id = 1
     var rpc_cbs: list[(id: str, cb: action(Client, ?xml.Node, ?NetconfError) -> None)] = []
 
-    var c: ?ssh_client.Client = None
+    var p: ?Pipe = pipe
     var state = STATE_NONE
 
     def _parse_rpc_errors(rpc_reply: xml.Node) -> ?NetconfError:
@@ -230,8 +232,8 @@ actor Client(
             rpc_cb.cb(self, None, None)
         rpc_cbs.clear()
 
-        if c is not None:
-            c.close(cb)
+        if p is not None:
+            p.close(cb)
         else:
             if cb is not None:
                 cb()
@@ -254,31 +256,31 @@ actor Client(
 
         state = STATE_NONE
 
-        if c is not None:
-            c.restart()
+        if p is not None:
+            p.restart()
         else:
-            _log.warning("Cannot restart, SSH client is not running")
+            _log.warning("Cannot restart, transport pipe is not running")
 
     def _send_message(data: Buffer) -> None:
-        if c is not None:
+        if p is not None:
             if framing == SEPARATOR_FRAMING:
                 data.write_bytes(LEGACY_SEPARATOR)
                 _msg = data.read_all_bytes()
                 _log.trace("Sending message", {"msg": _msg})
-                c.write(_msg)
+                p.write(_msg)
             elif framing == CHUNKED_FRAMING:
                 while True:
                     chunk_size = CHUNK_SIZE_MAX if data.unread_bytes > CHUNK_SIZE_MAX else data.unread_bytes
                     if chunk_size <= 0:
-                        c.write("\n##\n".encode())
+                        p.write("\n##\n".encode())
                         break
 
                     _chunk = data.read_bytes(chunk_size)
                     _log.trace("Sending chunk", {"chunk_size": chunk_size, "chunk": _chunk})
-                    c.write(("\n#" + str(chunk_size) + "\n").encode())
-                    c.write(_chunk)
+                    p.write(("\n#" + str(chunk_size) + "\n").encode())
+                    p.write(_chunk)
         else:
-            on_connect(self, BrokenPipeError("Cannot send message, SSH process is not running"))
+            on_connect(self, BrokenPipeError("Cannot send message, transport pipe is not running"))
 
     def rpc(content: xml.Node, callback: action(Client, ?xml.Node, ?NetconfError) -> None) -> None:
         message_id_text = str(message_id)
@@ -744,7 +746,7 @@ actor Client(
         # TODO: FIXME: match_bytes should always return bytes or raise exception
         raise UnreachableError("Unexpected state in _on_chunked_msg_data")
 
-    def _on_receive(c, data: bytes):
+    def _on_receive(data: bytes):
         #_log.trace("DATA:", {"data": data})
         recv_buf.write_bytes(data)
         try_read: bool = True
@@ -760,7 +762,13 @@ actor Client(
                 try_read = False
                 on_connect(self, NetconfError("Unknown framing type: {framing}"))
 
-    def _on_connect(c, err: ?Exception):
+    def _on_pipe_event(err: ?Exception, data: ?bytes):
+        if data is not None:
+            _on_receive(data)
+            return
+        _on_connect(err)
+
+    def _on_connect(err: ?Exception):
         if err is not None:
             _log.error("Failed to connect", {"err": err})
             on_connect(self, err)
@@ -770,19 +778,239 @@ actor Client(
             _send_hello()
 
     def _connect():
-        c = ssh_client.Client(auth,
-                              on_connect=_on_connect,
-                              on_receive=_on_receive,
-                              address=address,
-                              username=username,
-                              key=None,
-                              password=password,
-                              port=port,
-                              subsystem="netconf",
-                              skip_host_key_check=skip_host_key_check,
-                              log_handler=log_handler)
+        if p is None:
+            p = SshPipe(auth=auth,
+                        address=address,
+                        username=username,
+                        key=key,
+                        password=password,
+                        port=port,
+                        subsystem="netconf",
+                        skip_host_key_check=skip_host_key_check,
+                        log_handler=log_handler,
+                        read_cb=_on_pipe_event)
+        else:
+            active_pipe = p
+            if active_pipe is not None:
+                active_pipe.read_cb(_on_pipe_event)
 
     _connect()
+
+
+actor Server(
+        pipe: Pipe,
+        on_connect: ?action(Server, ?Exception) -> None=None,
+        on_rpc: action(Server, str, xml.Node) -> None,
+        capabilities: ?list[str]=None,
+        log_handler: ?logging.Handler=None):
+
+    _log = logging.Logger(log_handler)
+
+    var framing = SEPARATOR_FRAMING
+    var recv_buf = Buffer()
+    var chunk_buf = Buffer()
+    var server_capabilities = capabilities if capabilities is not None else [CAP_NC_1_0, CAP_NC_1_1]
+
+    def close(cb: ?action() -> None):
+        pipe.close(cb)
+
+    def restart():
+        framing = SEPARATOR_FRAMING
+        recv_buf = Buffer()
+        chunk_buf = Buffer()
+        pipe.restart()
+
+    def _send_message(data: Buffer):
+        if framing == SEPARATOR_FRAMING:
+            data.write_bytes(LEGACY_SEPARATOR)
+            pipe.write(data.read_all_bytes())
+        elif framing == CHUNKED_FRAMING:
+            while True:
+                chunk_size = CHUNK_SIZE_MAX if data.unread_bytes > CHUNK_SIZE_MAX else data.unread_bytes
+                if chunk_size <= 0:
+                    pipe.write("\n##\n".encode())
+                    break
+
+                chunk = data.read_bytes(chunk_size)
+                pipe.write(("\n#" + str(chunk_size) + "\n").encode())
+                pipe.write(chunk)
+
+    def _send_node(node: xml.Node):
+        buf = Buffer()
+        buf.write_str(xml.encode(node))
+        _send_message(buf)
+
+    def _send_hello():
+        caps = []
+        for cap in server_capabilities:
+            caps.append(xml.Node("capability", text=cap))
+
+        hello = xml.Node("hello", [(None, NS_NC_1_0)], children=[
+            xml.Node("capabilities", children=caps)
+        ])
+        _send_node(hello)
+
+    def _send_rpc_reply(message_id: str, children: list[xml.Node]):
+        rpc_reply = xml.Node("rpc-reply", [(None, NS_NC_1_0)], None, [("message-id", message_id)], children)
+        _send_node(rpc_reply)
+
+    def send_reply(message_id: str, children: list[xml.Node]):
+        _send_rpc_reply(message_id, children)
+
+    def _send_ok(message_id: str):
+        _send_rpc_reply(message_id, [xml.Node("ok")])
+
+    def send_ok(message_id: str):
+        _send_ok(message_id)
+
+    def _send_error(message_id: str, error_tag: str, error_message: str, error_type: str="application"):
+        rpc_error = xml.Node("rpc-error", children=[
+            xml.Node("error-type", text=error_type),
+            xml.Node("error-tag", text=error_tag),
+            xml.Node("error-severity", text="error"),
+            xml.Node("error-message", text=error_message)
+        ])
+        _send_rpc_reply(message_id, [rpc_error])
+
+    def send_error(message_id: str, error_tag: str, error_message: str, error_type: str="application"):
+        _send_error(message_id, error_tag, error_message, error_type)
+
+    def _read_message_id(root: xml.Node, default_id: str) -> str:
+        message_id = default_id
+        for attr_name, attr_val in root.attributes:
+            if attr_name == "message-id" or attr_name.split(":", -1)[-1] == "message-id":
+                message_id = attr_val
+                break
+        return message_id
+
+    def _on_msg_hello(root: xml.Node):
+        client_supports_1_1 = False
+        for n in root.children:
+            if n.tag == "capabilities":
+                for cap in n.children:
+                    if cap.tag == "capability":
+                        cap_text = cap.text
+                        if cap_text == CAP_NC_1_1:
+                            client_supports_1_1 = True
+        if client_supports_1_1 and CAP_NC_1_1 in server_capabilities:
+            framing = CHUNKED_FRAMING
+
+    def _dispatch_rpc(message_id: str, op: xml.Node):
+        if op.tag == "close-session":
+            _send_ok(message_id)
+            return
+
+        on_rpc(self, message_id, op)
+
+    def _on_msg_rpc(root: xml.Node):
+        message_id = _read_message_id(root, "0")
+        if len(root.children) == 0:
+            _send_error(message_id, "missing-element", "RPC request has no operation")
+            return
+        _dispatch_rpc(message_id, root.children[0])
+
+    def _handle_msg(msg: str):
+        if msg == "":
+            return
+
+        try:
+            root = xml.decode(msg)
+            if root.tag == "hello":
+                _on_msg_hello(root)
+            elif root.tag == "rpc":
+                _on_msg_rpc(root)
+            else:
+                _log.warning("Unhandled NETCONF message", {"tag": root.tag})
+        except Exception as e:
+            _log.error("Failed to decode NETCONF message", {"exception": e, "msg": msg})
+
+    def _on_legacy_msg_data() -> bool:
+        i = recv_buf.find_bytes(LEGACY_SEPARATOR)
+        if isinstance(i, int):
+            msg_data = recv_buf.read_bytes(i)
+            if isinstance(msg_data, bytes):
+                recv_buf.skip_bytes(len(LEGACY_SEPARATOR))
+                recv_buf.consume()
+                _handle_msg(msg_data.decode())
+                return True
+        recv_buf.rewind()
+        return False
+
+    def _on_chunked_msg_data() -> bool:
+        m = recv_buf.match_bytes(CHUNK_TAG_PREFIX)
+        if isinstance(m, IncompleteReadError):
+            recv_buf.rewind()
+            return False
+        elif isinstance(m, bool):
+            if not m:
+                _log.error("Invalid NETCONF chunk framing")
+                return False
+
+            len_text_len = recv_buf.find_bytes(CHUNK_TAG_POSTFIX)
+            if isinstance(len_text_len, IncompleteReadError):
+                recv_buf.rewind()
+                return False
+            elif isinstance(len_text_len, int):
+                len_text = recv_buf.read_bytes(len_text_len)
+
+                skip_ok = recv_buf.skip_bytes(len(CHUNK_TAG_POSTFIX))
+                if isinstance(skip_ok, IncompleteReadError):
+                    recv_buf.rewind()
+                    return False
+                elif isinstance(skip_ok, bool) and skip_ok:
+                    if isinstance(len_text, bytes):
+                        if len_text == CHUNK_TAG_END_OF_MSG:
+                            msg_data = chunk_buf.read_all_bytes()
+                            chunk_buf.consume()
+                            _handle_msg(msg_data.decode())
+                            return True
+
+                        try:
+                            l = int(len_text.decode())
+                            chunk = recv_buf.read_bytes(l)
+                            chunk_buf.write_bytes(chunk)
+                            recv_buf.consume()
+                            return True
+                        except IncompleteReadError:
+                            recv_buf.rewind()
+                            return False
+        raise UnreachableError("Unexpected state in _on_chunked_msg_data")
+
+    def _on_receive(data: bytes):
+        recv_buf.write_bytes(data)
+        try_read: bool = True
+        while recv_buf.has_unread_bytes():
+            if not try_read:
+                break
+            if framing == SEPARATOR_FRAMING:
+                try_read = _on_legacy_msg_data()
+            elif framing == CHUNKED_FRAMING:
+                try_read = _on_chunked_msg_data()
+            else:
+                try_read = False
+                _log.error("Unknown framing type", {"framing": framing})
+
+    def _on_pipe_event(err: ?Exception, data: ?bytes):
+        if data is not None:
+            _on_receive(data)
+            return
+
+        if err is None:
+            framing = SEPARATOR_FRAMING
+            recv_buf = Buffer()
+            chunk_buf = Buffer()
+            _send_hello()
+            _on_connect = on_connect
+            if _on_connect is not None:
+                _on_connect(self, None)
+        else:
+            _log.error("Transport pipe connection error", {"error": err})
+            _on_connect = on_connect
+            if _on_connect is not None:
+                _on_connect(self, err)
+
+    pipe.read_cb(_on_pipe_event)
+
 
 class NsMaps(object):
     def __init__(self, namespaces: list[(?str, str)], parent: ?NsMaps):
@@ -881,6 +1109,68 @@ test_port = 42830
 test_address = "localhost"
 test_username = "admin"
 test_password = "admin"
+
+
+actor _test_client_server_actor_pipe_get(t: testing.EnvT):
+    """Test in-process Client <-> Server over ActorPipe with a static <get> reply."""
+    log = logging.Logger(t.log_handler)
+    pipes = actor_pipe_pair()
+
+    def _on_server_rpc(s: Server,
+                       message_id: str,
+                       op: xml.Node):
+        if op.tag != "get":
+            s.send_error(message_id, "operation-not-supported", "Unsupported RPC operation: {op.tag}")
+            return
+
+        s.send_reply(message_id, [xml.Node("data", [(None, NS_NC_1_0)], children=[
+            xml.Node("system", [(None, "urn:example:system")], children=[
+                xml.Node("hostname", text="actor-pipe-demo")
+            ])
+        ])])
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            t.failure(ValueError("Failed to connect to in-process NETCONF server: {e}"))
+        else:
+            c.get(_on_get)
+
+    def _on_get(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            t.failure(error)
+            return
+        if result is None:
+            t.failure(ValueError("Missing rpc-reply"))
+            return
+
+        hostname = None
+        if result is not None:
+            for rpc_child in result.children:
+                if rpc_child.tag == "data":
+                    for data_child in rpc_child.children:
+                        if data_child.tag == "system":
+                            for system_child in data_child.children:
+                                if system_child.tag == "hostname":
+                                    hostname = system_child.text
+
+        if hostname == "actor-pipe-demo":
+            log.info("In-process NETCONF <get> completed")
+            c.close(None)
+            t.success()
+        else:
+            t.failure(ValueError("Unexpected hostname in reply: {hostname}"))
+
+    server = Server(pipe=pipes.server, on_rpc=_on_server_rpc, log_handler=t.log_handler)
+    client = Client(t.env.auth,
+                    address="actor-pipe",
+                    username="actor-pipe",
+                    key=None,
+                    password=None,
+                    port=0,
+                    on_connect=_on_connect,
+                    on_notif=None,
+                    log_handler=t.log_handler,
+                    pipe=pipes.client)
 
 
 actor _test_netconf(t: testing.EnvT):
