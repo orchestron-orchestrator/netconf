@@ -16,11 +16,12 @@
 import logging
 import net
 import process
+import random
 import testing
 import xml
 
 from buffer import Buffer, IncompleteReadError
-from transport import Pipe, SshPipe, actor_pipe_pair
+from transport import Pipe, SshPipe, TcpListenPipe, TcpPipe, TcpPipeListener, actor_pipe_pair
 
 SEPARATOR_FRAMING: int = 0
 CHUNKED_FRAMING: int = 1
@@ -1171,6 +1172,99 @@ actor _test_client_server_actor_pipe_get(t: testing.EnvT):
                     on_notif=None,
                     log_handler=t.log_handler,
                     pipe=pipes.client)
+
+
+actor _test_client_server_tcp_get(t: testing.EnvT):
+    """Test loopback TCP Client <-> Server over TcpPipe with a static <get> reply."""
+    log = logging.Logger(t.log_handler)
+    port = random.randint(20000, 29999)
+    var done = False
+    var servers: list[Server] = []
+    var listener: ?TcpPipeListener = None
+    var client: ?Client = None
+    connect_cap = net.TCPConnectCap(net.TCPCap(net.NetCap(t.env.auth)))
+    listen_cap = net.TCPListenCap(net.TCPCap(net.NetCap(t.env.auth)))
+
+    def _fail_once(err: Exception):
+        if done:
+            return
+        done = True
+        t.failure(err)
+
+    def _success_once():
+        if done:
+            return
+        done = True
+        t.success()
+
+    def _on_server_rpc(s: Server, message_id: str, op: xml.Node):
+        if op.tag != "get":
+            s.send_error(message_id, "operation-not-supported", "Unsupported RPC operation: {op.tag}")
+            return
+
+        s.send_reply(message_id, [xml.Node("data", [(None, NS_NC_1_0)], children=[
+            xml.Node("system", [(None, "urn:example:system")], children=[
+                xml.Node("hostname", text="tcp-pipe-demo")
+            ])
+        ])])
+
+    def _on_accept(l: TcpPipeListener, p: TcpListenPipe):
+        servers.append(Server(pipe=p, on_rpc=_on_server_rpc, log_handler=t.log_handler))
+
+    def _on_listen(l: TcpPipeListener, err: ?Exception):
+        if err is not None:
+            _fail_once(ValueError("Failed to start TCP listener on 127.0.0.1:{port}: {err}"))
+            return
+
+        log.info("TCP listener ready", {"port": port})
+        client_pipe = TcpPipe(connect_cap=connect_cap, address="127.0.0.1", port=port)
+        client = Client(t.env.auth,
+                        address="127.0.0.1",
+                        username="tcp-pipe",
+                        key=None,
+                        password=None,
+                        port=port,
+                        on_connect=_on_connect,
+                        on_notif=None,
+                        log_handler=t.log_handler,
+                        pipe=client_pipe)
+
+    def _on_connect(c: Client, e: ?Exception):
+        if e is not None:
+            _fail_once(ValueError("Failed to connect to loopback NETCONF server: {e}"))
+        else:
+            c.get(_on_get)
+
+    def _on_get(c: Client, result: ?xml.Node, error: ?NetconfError):
+        if error is not None:
+            _fail_once(error)
+            return
+        if result is None:
+            _fail_once(ValueError("Missing rpc-reply"))
+            return
+
+        hostname = None
+        if result is not None:
+            for rpc_child in result.children:
+                if rpc_child.tag == "data":
+                    for data_child in rpc_child.children:
+                        if data_child.tag == "system":
+                            for system_child in data_child.children:
+                                if system_child.tag == "hostname":
+                                    hostname = system_child.text
+
+        if hostname == "tcp-pipe-demo":
+            log.info("Loopback TCP NETCONF <get> completed")
+            c.close(None)
+            _success_once()
+        else:
+            _fail_once(ValueError("Unexpected hostname in reply: {hostname}"))
+
+    def _on_timeout():
+        _fail_once(ValueError("Timed out waiting for loopback TCP NETCONF <get>"))
+
+    after 2.0: _on_timeout()
+    listener = TcpPipeListener(listen_cap, "127.0.0.1", port, _on_listen, _on_accept)
 
 
 actor _test_netconf(t: testing.EnvT):
