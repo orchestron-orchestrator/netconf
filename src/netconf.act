@@ -153,7 +153,7 @@ state_name = {
 }
 
 actor Client(
-        auth: WorldCap,
+        auth: ?WorldCap,
         address: str,
         port: int,
         username: str,
@@ -780,20 +780,22 @@ actor Client(
 
     def _connect():
         if p is None:
-            p = SshPipe(auth=auth,
-                        address=address,
-                        username=username,
-                        key=key,
-                        password=password,
-                        port=port,
-                        subsystem="netconf",
-                        skip_host_key_check=skip_host_key_check,
-                        log_handler=log_handler,
-                        read_cb=_on_pipe_event)
+            if auth is not None:
+                p = SshPipe(auth=auth,
+                            address=address,
+                            username=username,
+                            key=key,
+                            password=password,
+                            port=port,
+                            subsystem="netconf",
+                            skip_host_key_check=skip_host_key_check,
+                            log_handler=log_handler,
+                            read_cb=_on_pipe_event)
+            else:
+                on_connect(self, ValueError("auth is required to establish SSH connection"))
         else:
-            active_pipe = p
-            if active_pipe is not None:
-                active_pipe.read_cb(_on_pipe_event)
+            if p is not None:
+                p.read_cb(_on_pipe_event)
 
     _connect()
 
