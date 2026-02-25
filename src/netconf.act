@@ -893,7 +893,7 @@ actor Server(
                 for cap in n.children:
                     if cap.tag == "capability":
                         cap_text = cap.text
-                        if cap_text == CAP_NC_1_1:
+                        if cap_text is not None and cap_text == CAP_NC_1_1:
                             client_supports_1_1 = True
         if client_supports_1_1 and CAP_NC_1_1 in server_capabilities:
             framing = CHUNKED_FRAMING
