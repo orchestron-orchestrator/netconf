@@ -21,6 +21,8 @@ import testing
 import xml
 
 from buffer import Buffer, IncompleteReadError
+from fixups import FIXUPS
+from fixups.base import Fixup
 from transport import Pipe, SshPipe, TcpListenPipe, TcpPipe, TcpPipeListener, actor_pipe_pair
 
 SEPARATOR_FRAMING: int = 0
@@ -60,6 +62,12 @@ class ConnectionRefusedError(ConnectionError):
 class ConnectionResetError(ConnectionError):
     pass
 
+def unwrap[T](a: ?T, msg: ?str=None) -> T:
+    if a is not None:
+        return a
+    errmsg = msg if msg is not None else "Expected non-None value"
+    raise ValueError(errmsg)
+
 
 class NetconfError(Exception):
     def __init__(self, error_message: ?str, rpc_error: ?list[RpcError]):
@@ -95,19 +103,14 @@ class RpcError(object):
         self.error_message = None
         self.error_info = None
 
-        def expect(t, errmsg):
-            if t is not None:
-                return t
-            raise ValueError(errmsg)
-
         # Parse the XML into well-known attributes
         for child in xml_node.children:
             if child.tag == "error-type":
-                self.error_type = expect(child.text, "rpc-error missing expected error-type")
+                self.error_type = unwrap(child.text, "rpc-error missing expected error-type")
             elif child.tag == "error-tag":
-                self.error_tag = expect(child.text, "rpc-error missing expected error-tag")
+                self.error_tag = unwrap(child.text, "rpc-error missing expected error-tag")
             elif child.tag == "error-severity":
-                self.error_severity = expect(child.text, "rpc-error missing expected error-severity")
+                self.error_severity = unwrap(child.text, "rpc-error missing expected error-severity")
             elif child.tag == "error-app-tag":
                 self.error_app_tag = child.text
             elif child.tag == "error-path":
@@ -152,6 +155,7 @@ state_name = {
     STATE_DISCONNECTING: "disconnecting"
 }
 
+
 actor Client(
         auth: ?WorldCap,
         address: str,
@@ -163,7 +167,8 @@ actor Client(
         on_notif: ?action(Client, xml.Node) -> None,
         skip_host_key_check: bool=False,
         log_handler: ?logging.Handler,
-        pipe: ?Pipe=None):
+        pipe: ?Pipe=None,
+        fixups: ?list[proc() -> Fixup]=FIXUPS):
 
     _log = logging.Logger(log_handler)
     _log.info("Connecting to " + address + ":" + str(port) + " as " + username)
@@ -204,6 +209,63 @@ actor Client(
 
     var p: ?Pipe = pipe
     var state = STATE_NONE
+    var active_fixups: list[Fixup] = []
+
+    def _prune_inactive_fixups():
+        active: list[Fixup] = []
+        for fx in active_fixups:
+            if fx.active:
+                active.append(fx)
+            else:
+                _log.info("NETCONF fixup deactivated", {"fixup": fx.name, "reason": fx.deactivate_reason})
+        active_fixups = active
+
+    def _activate_fixups():
+        active_fixups.clear()
+        if fixups is None:
+            _log.debug("NETCONF fixups disabled")
+            return
+        configured_fixups = unwrap(fixups, "Expected fixup list")
+
+        for mk in configured_fixups:
+            try:
+                fx = mk()
+                activated = fx.activate(capabilities)
+                if activated and fx.active:
+                    active_fixups.append(fx)
+                    _log.info("NETCONF fixup activated", {"fixup": fx.name})
+                else:
+                    reason = fx.deactivate_reason
+                    if reason is None:
+                        if not activated:
+                            reason = "capability mismatch"
+                        else:
+                            reason = "inactive after activation"
+                    _log.info("NETCONF fixup not activated", {"fixup": fx.name, "reason": reason})
+            except Exception as exc:
+                _log.error("NETCONF fixup activation failed", {"exception": exc})
+        _prune_inactive_fixups()
+
+    def _apply_request_fixups(op: xml.Node) -> xml.Node:
+        out = op
+        for fx in active_fixups:
+            try:
+                out = fx.on_request(out)
+            except Exception as exc:
+                _log.error("NETCONF request fixup failed", {"fixup": fx.name, "exception": exc})
+        _prune_inactive_fixups()
+        return out
+
+    def _apply_response_fixups(rpc_reply: xml.Node) -> xml.Node:
+        out = rpc_reply
+        # Run response hooks in reverse order (stack-like unwind)
+        for fx in reversed(active_fixups):
+            try:
+                out = fx.on_response(out)
+            except Exception as exc:
+                _log.error("NETCONF response fixup failed", {"fixup": fx.name, "exception": exc})
+        _prune_inactive_fixups()
+        return out
 
     def _parse_rpc_errors(rpc_reply: xml.Node) -> ?NetconfError:
         """Parse <rpc-error> elements from an rpc-reply and return NetconfError if found"""
@@ -256,6 +318,7 @@ actor Client(
         rpc_cbs.clear()
 
         state = STATE_NONE
+        active_fixups.clear()
 
         if p is not None:
             p.restart()
@@ -286,6 +349,7 @@ actor Client(
     def rpc(content: xml.Node, callback: action(Client, ?xml.Node, ?NetconfError) -> None) -> None:
         message_id_text = str(message_id)
         message_id += 1
+        fixed_content = _apply_request_fixups(content)
 
         # If using an explicit namespace prefix, prepend it to the attribute name.
         # The namespace (prefix or not) is defined in the tag.
@@ -294,7 +358,7 @@ actor Client(
         else:
             rpc_attrs = [("message-id", message_id_text)]
 
-        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_0)], nc_prefix, rpc_attrs, [content])
+        root = xml.Node("rpc", [(nc_prefix, NS_NC_1_0)], nc_prefix, rpc_attrs, [fixed_content])
 
         buf: Buffer = Buffer()
         buf.write_str(xml.encode(root))
@@ -640,6 +704,7 @@ actor Client(
                         pass # TODO: Warn?
             elif n.tag == "session-id": # TODO: check namespace as well?
                 session_id = n.text
+        _activate_fixups()
         state = "CONNECTED"
         on_connect(self, None)
 
@@ -663,28 +728,30 @@ actor Client(
                 msg_id = attr_val
                 break
 
+        fixed_root = _apply_response_fixups(root)
+
         if len(rpc_cbs) > 0:
             cb = rpc_cbs.pop(0)
             if msg_id is None:
-                _log.warning("Received invalid rpc-reply, missing message-id", {"msg": root.encode()})
+                _log.warning("Received invalid rpc-reply, missing message-id", {"msg": fixed_root.encode()})
             elif msg_id is not None and msg_id != cb.id:
                 _log.warning("Received rpc-reply with unexpected message-id", {"msg-id": msg_id, "cb.id": cb.id})
 
-            if len(root.children) == 0:
-                cb.cb(self, root, NetconfError("Empty <rpc-reply>"))
-            elif len(root.children) == 1 and root.children[0].tag == "ok":
+            if len(fixed_root.children) == 0:
+                cb.cb(self, fixed_root, NetconfError("Empty <rpc-reply>"))
+            elif len(fixed_root.children) == 1 and fixed_root.children[0].tag == "ok":
                 # TODO: Should also verify namespace is NS_NC_1_0
-                cb.cb(self, root, None)
+                cb.cb(self, fixed_root, None)
             else:
                 # Parse for errors
-                error = _parse_rpc_errors(root)
+                error = _parse_rpc_errors(fixed_root)
 
                 if error is not None:
                     # Error response
-                    cb.cb(self, root, error)
+                    cb.cb(self, fixed_root, error)
                 else:
                     # Normal data response - pass the whole root
-                    cb.cb(self, root, None)
+                    cb.cb(self, fixed_root, None)
         else:
             _log.error("No more RPC callbacks", {"msg-id": msg_id})
 
@@ -859,6 +926,9 @@ actor Server(
 
     def send_reply(message_id: str, children: list[xml.Node]):
         _send_rpc_reply(message_id, children)
+
+    def send_notification(notification: xml.Node):
+        _send_node(notification)
 
     def _send_ok(message_id: str):
         _send_rpc_reply(message_id, [xml.Node("ok")])
