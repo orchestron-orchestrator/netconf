@@ -136,7 +136,7 @@ class OpenConfigListKeyFixup(Fixup):
 
     def activate(self, capabilities: list[str]) -> bool:
         for cap in capabilities:
-            if "openconfig-interfaces" in cap:
+            if "openconfig-interfaces" in cap or "http://openconfig.net/yang/interfaces" in cap:
                 return True
         return False
 
