@@ -13,6 +13,7 @@ jobs:
       - name: "Check out repository code"
         uses: actions/checkout@v4
       - run: acton build
+      - run: acton test
       - name: "Start notconf in background"
         run: |
           docker run -td --name notconf --publish 42830:830 ghcr.io/notconf/notconf
