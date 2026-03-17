@@ -157,7 +157,7 @@ state_name = {
 
 
 actor Client(
-        auth: ?WorldCap,
+        pcap: ?process.ProcessCap,
         address: str,
         port: int,
         username: str,
@@ -847,8 +847,8 @@ actor Client(
 
     def _connect():
         if p is None:
-            if auth is not None:
-                p = SshPipe(auth=auth,
+            if pcap is not None:
+                p = SshPipe(pcap=pcap,
                             address=address,
                             username=username,
                             key=key,
@@ -1234,7 +1234,7 @@ actor _test_client_server_actor_pipe_get(t: testing.EnvT):
             t.failure(ValueError("Unexpected hostname in reply: {hostname}"))
 
     server = Server(pipe=pipes.server, on_rpc=_on_server_rpc, log_handler=t.log_handler)
-    client = Client(t.env.auth,
+    client = Client(process.ProcessCap(t.env.auth),
                     address="actor-pipe",
                     username="actor-pipe",
                     key=None,
@@ -1290,7 +1290,7 @@ actor _test_client_server_tcp_get(t: testing.EnvT):
 
         log.info("TCP listener ready", {"port": port})
         client_pipe = TcpPipe(connect_cap=connect_cap, address="127.0.0.1", port=port)
-        client = Client(t.env.auth,
+        client = Client(process.ProcessCap(t.env.auth),
                         address="127.0.0.1",
                         username="tcp-pipe",
                         key=None,
@@ -1364,7 +1364,7 @@ actor _test_netconf(t: testing.EnvT):
             log.info("<get-config> success")
             t.success()
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 address=test_address,
                 username=test_username,
@@ -1404,7 +1404,7 @@ actor _test_get_schema(t: testing.EnvT):
             log.error("<get-schema> received null response")
             t.failure(ValueError("get-schema returned null"))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1444,7 +1444,7 @@ actor _test_list_schemas(t: testing.EnvT):
                 log.warning("No schemas found")
                 t.failure(Exception("No schemas found"))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1506,7 +1506,7 @@ actor _test_schema_getter(t: testing.EnvT):
         else:
             t.success()
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1550,7 +1550,7 @@ actor _test_lock_unlock(t: testing.EnvT):
             log.info("Lock and unlock test completed successfully")
             t.success()
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1610,7 +1610,7 @@ actor _test_get_config_with_filter(t: testing.EnvT):
             log.error("<get-config> with filter received null response")
             t.failure(ValueError("get-config with filter returned null"))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1666,7 +1666,7 @@ actor _test_get_config_with_xpath_filter(t: testing.EnvT):
             log.error("<get-config> with XPath filter received null response")
             t.failure(ValueError("get-config with XPath filter returned null"))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
@@ -1705,7 +1705,7 @@ actor _test_rpc_error_repr(t: testing.EnvT):
             log.error("Expected an error from invalid lock operation, but got success")
             t.failure(ValueError("Lock on non-existent datastore should have failed"))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_notif=None,
                 address=test_address,
