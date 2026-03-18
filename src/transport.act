@@ -46,7 +46,7 @@ class SshPipe(Pipe):
     _read_cb: ?action(?Exception, ?bytes) -> None
 
     def __init__(self,
-                 auth: WorldCap,
+                 pcap,
                  address: str,
                  port: int,
                  username: str,
@@ -70,7 +70,7 @@ class SshPipe(Pipe):
             if cb is not None:
                 cb(None, data)
 
-        self._client = ssh_client.Client(auth,
+        self._client = ssh_client.Client(pcap,
                                          on_connect=_on_connect,
                                          on_receive=_on_receive,
                                          address=address,

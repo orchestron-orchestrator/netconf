@@ -36,7 +36,7 @@ state_name = {
     STATE_DISCONNECTING: "disconnecting"
 }
 
-actor Client(auth: WorldCap,
+actor Client(auth: process.ProcessCap,
              on_connect: action(Client, ?Exception) -> None,
              on_receive: action(Client, data: bytes) -> None,
              address: str,
@@ -237,7 +237,7 @@ actor Client(auth: WorldCap,
         _log.trace("CMD", {"cmd": cmd})
 
         state = STATE_CONNECTING
-        p = process.Process(process.ProcessCap(auth), cmd, _p_on_stdout, _p_on_stderr, _p_on_exit, _p_on_error, env=cmd_env)
+        p = process.Process(auth, cmd, _p_on_stdout, _p_on_stderr, _p_on_exit, _p_on_error, env=cmd_env)
 
     _connect()
 
@@ -274,7 +274,7 @@ actor _test_bad_credentials(t: testing.EnvT):
     def _on_receive(c: Client, data: bytes):
         log.info("Received data: " + str(data))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_receive=_on_receive,
                 address=test_address,
@@ -303,7 +303,7 @@ actor _test_netconf(t: testing.EnvT):
         else:
             log.error("Received unexpected data: " + str(data))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_receive=_on_receive,
                 address=test_address,
@@ -334,7 +334,7 @@ actor _test_restart(t: testing.EnvT):
     def _on_receive(c: Client, data: bytes):
         log.info("Received data: " + str(data))
 
-    c = Client(t.env.auth,
+    c = Client(process.ProcessCap(t.env.auth),
                 on_connect=_on_connect,
                 on_receive=_on_receive,
                 address=test_address,
@@ -370,7 +370,7 @@ actor client(env: Env):
     def _on_receive(c: Client, data: bytes):
         log.info("Received data: {data}")
 
-    c = Client(env.auth,
+    c = Client(process.ProcessCap(env.auth),
                 on_connect=_on_connect,
                 on_receive=_on_receive,
                 address=test_address,

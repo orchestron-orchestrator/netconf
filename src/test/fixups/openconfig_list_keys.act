@@ -1,3 +1,4 @@
+import process
 import testing
 import xml
 import netconf
@@ -114,7 +115,7 @@ actor _test_openconfig_fixup_default_enabled(t: testing.EnvT):
             s.send_error(message_id, "operation-not-supported", "Unsupported RPC operation: {op.tag}")
 
     server = netconf.Server(pipe=pipes.server, on_rpc=_on_server_rpc, capabilities=caps, log_handler=t.log_handler)
-    client = netconf.Client(t.env.auth,
+    client = netconf.Client(process.ProcessCap(t.env.auth),
                             address="actor-pipe",
                             username="actor-pipe",
                             key=None,
@@ -158,7 +159,7 @@ actor _test_openconfig_fixup_disabled(t: testing.EnvT):
             s.send_error(message_id, "operation-not-supported", "Unsupported RPC operation: {op.tag}")
 
     server = netconf.Server(pipe=pipes.server, on_rpc=_on_server_rpc, capabilities=caps, log_handler=t.log_handler)
-    client = netconf.Client(t.env.auth,
+    client = netconf.Client(process.ProcessCap(t.env.auth),
                             address="actor-pipe",
                             username="actor-pipe",
                             key=None,
@@ -231,7 +232,7 @@ actor _test_openconfig_fixup_self_deactivates_after_clean_reply(t: testing.EnvT)
         else:
             s.send_error(message_id, "operation-not-supported", "Unexpected extra RPC")
     server = netconf.Server(pipe=pipes.server, on_rpc=_on_server_rpc, capabilities=caps, log_handler=t.log_handler)
-    client = netconf.Client(t.env.auth,
+    client = netconf.Client(process.ProcessCap(t.env.auth),
                             address="actor-pipe",
                             username="actor-pipe",
                             key=None,
@@ -276,7 +277,7 @@ actor _test_openconfig_fixup_capability_gated(t: testing.EnvT):
             s.send_error(message_id, "operation-not-supported", "Unsupported RPC operation: {op.tag}")
 
     server = netconf.Server(pipe=pipes.server, on_rpc=_on_server_rpc, capabilities=caps, log_handler=t.log_handler)
-    client = netconf.Client(t.env.auth,
+    client = netconf.Client(process.ProcessCap(t.env.auth),
                             address="actor-pipe",
                             username="actor-pipe",
                             key=None,
