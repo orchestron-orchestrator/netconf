@@ -42,8 +42,9 @@ class Pipe(object):
 
 
 class SshPipe(Pipe):
-    _client: ?ssh_client.Client
-    _read_cb: ?action(?Exception, ?bytes) -> None
+    _client: ssh_client.Client
+    @property
+    _read_cb: action(?Exception, ?bytes) -> None
 
     def __init__(self,
                  pcap,
@@ -55,57 +56,33 @@ class SshPipe(Pipe):
                  subsystem: ?str=None,
                  skip_host_key_check: bool=False,
                  log_handler: ?logging.Handler=None,
-                 read_cb: ?action(?Exception, ?bytes) -> None=None):
+                 read_cb: action(?Exception, ?bytes) -> None):
 
         self._read_cb = read_cb
-        self._client = None
-
-        def _on_connect(c: ssh_client.Client, err: ?Exception):
-            cb = self._read_cb
-            if cb is not None:
-                cb(err, None)
-
-        def _on_receive(c: ssh_client.Client, data: bytes):
-            cb = self._read_cb
-            if cb is not None:
-                cb(None, data)
 
         self._client = ssh_client.Client(pcap,
-                                         on_connect=_on_connect,
-                                         on_receive=_on_receive,
-                                         address=address,
-                                         username=username,
-                                         key=key,
-                                         password=password,
-                                         port=port,
-                                         subsystem=subsystem,
-                                         skip_host_key_check=skip_host_key_check,
-                                         log_handler=log_handler)
+                                         (lambda c,e: read_cb(e,None)),
+                                         (lambda c,data: read_cb(None,data)),
+                                         address,
+                                         username,
+                                         key,
+                                         password,
+                                         port,
+                                         subsystem,
+                                         skip_host_key_check,
+                                         log_handler)
 
     proc def write(self, data: bytes):
-        c = self._client
-        if c is not None:
-            c.write(data)
-        else:
-            raise ValueError("Unable to write, SSH pipe client not running")
+        self._client.write(data)
 
     proc def read_cb(self, cb: action(?Exception, ?bytes) -> None):
         self._read_cb = cb
 
     proc def close(self, on_close: ?action() -> None):
-        c = self._client
-        if c is not None:
-            c.close(on_close)
-        elif on_close is not None:
-            on_close()
+        self._client.close(on_close)
 
     proc def restart(self):
-        c = self._client
-        if c is not None:
-            c.restart()
-        else:
-            raise ValueError("Unable to restart, SSH pipe client not running")
-
+        self._client.restart()
 
 actor _ActorPipeEndpoint():
     def _noop_read_cb(error: ?Exception, data: ?bytes):
