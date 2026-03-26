@@ -38,7 +38,7 @@ state_name = {
 
 actor Client(auth: process.ProcessCap,
              on_connect: action(Client, ?Exception) -> None,
-             on_receive: action(Client, data: bytes) -> None,
+             on_receive: action(Client, bytes) -> None,
              address: str,
              username: str,
              key: ?str,
