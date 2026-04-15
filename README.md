@@ -1,2 +1,2 @@
 # NETCONF client
-[![REUSE Compliance Check](https://github.com/orchestron-orchestrator/netconf/actions/workflows/reuse-compliance.yml/badge.svg)](https://github.com/orchestron-orchestrator/netconf/actions/workflows/reuse-compliance.yml)
+[![REUSE Compliance Check](https://github.com/stratoweave/netconf/actions/workflows/reuse-compliance.yml/badge.svg)](https://github.com/stratoweave/netconf/actions/workflows/reuse-compliance.yml)
